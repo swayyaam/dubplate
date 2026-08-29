@@ -12,6 +12,7 @@ import { NowPlayingView } from "./views/NowPlayingView";
 import { QueueView } from "./views/QueueView";
 import { SignalPathView } from "./views/SignalPathView";
 import { HealthView } from "./views/HealthView";
+import { PlaylistsView } from "./views/PlaylistsView";
 import { formatBytes, formatTotalTime } from "./lib/format";
 import { usePlayerValue } from "./lib/playerStore";
 
@@ -23,6 +24,7 @@ const TABS: { view: View; label: string }[] = [
   { view: "tracks", label: "Tracks" },
   { view: "playing", label: "Playing" },
   { view: "queue", label: "Queue" },
+  { view: "playlists", label: "Playlists" },
   { view: "health", label: "Health" },
 ];
 
@@ -231,7 +233,7 @@ export default function App() {
         void invoke("toggle_play");
       }
       // Cmd+1..4 for the views, the way every other Mac app does it.
-      if (event.metaKey && /^[1-5]$/.test(event.key)) {
+      if (event.metaKey && /^[1-6]$/.test(event.key)) {
         event.preventDefault();
         goTo(TABS[Number(event.key) - 1].view);
       }
@@ -365,6 +367,7 @@ export default function App() {
           />
         )}
         {hasLibrary && view === "signal" && <SignalPathView onBack={() => goTo("playing")} />}
+        {hasLibrary && view === "playlists" && <PlaylistsView onPlay={playFrom} />}
         {hasLibrary && view === "health" && <HealthView onPlay={playFrom} />}
         {hasLibrary && view === "queue" && <QueueView trackById={trackById} />}
       </main>

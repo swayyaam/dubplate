@@ -529,6 +529,53 @@ button, input { font: inherit; color: inherit; }
 .rate:hover { color: var(--text); }
 .rate--on { background: var(--accent-soft); color: var(--accent); }
 
+/* --- playlists ------------------------------------------------------------ */
+
+.playlists {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px var(--gutter) 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.playlists > * { max-width: 900px; width: 100%; margin-inline: auto; }
+.playlists__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+.playlists__list { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }
+.playlists__actions { display: flex; gap: 8px; margin: 6px 0 2px; }
+
+.playlist {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 9px 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: inherit;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.playlist:hover { background: #17171b; }
+.playlist--on { background: var(--accent-soft); }
+.playlist--on .playlist__name { color: var(--accent); }
+.playlist__name { font-size: 12.5px; }
+.playlist__count { font-family: var(--mono); font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.playlist__kind {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.playlist__fact {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 /* --- collection health ---------------------------------------------------- */
 
 .health {

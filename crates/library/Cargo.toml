@@ -19,6 +19,7 @@ notify = "8.2.0"
 blake3 = "1.8.7"
 image = "0.25.10"
 webp = "0.3.1"
+serde_json.workspace = true
 
 [dev-dependencies]
 image = "0.25.10"

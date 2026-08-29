@@ -10,8 +10,8 @@ use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, P
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
 use dubplate_analysis::{pipeline, PeaksCache};
 use dubplate_library::{
-    flow, health, history, index, query, watch, AlbumRow, CollectionHealth, FlowStep, Library,
-    LibraryWatcher, Listen, SyncReport, TrackRow,
+    flow, health, history, index, playlists, query, watch, AlbumRow, CollectionHealth, FlowStep,
+    Library, LibraryWatcher, Listen, PlaylistRow, SyncReport, TrackRow,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -410,6 +410,62 @@ fn run_analysis(app: &AppHandle, state: &Arc<AppState>) {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
+}
+
+#[tauri::command]
+async fn list_playlists(state: State<'_, Arc<AppState>>) -> Fallible<Vec<PlaylistRow>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        playlists::list(&library).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+async fn playlist_tracks(
+    state: State<'_, Arc<AppState>>,
+    playlist_id: i64,
+) -> Fallible<Vec<TrackRow>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        playlists::tracks(&library, playlist_id).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Create the ready-made smart playlists, skipping any that already exist.
+///
+/// A visual rule editor is a bigger thing; these cover the questions worth
+/// asking of a collection assembled over years, and each is a real rule set
+/// stored as JSON rather than a hard-coded query.
+#[tauri::command]
+fn add_preset_playlists(state: State<'_, Arc<AppState>>) -> Fallible<usize> {
+    let library = state.library.lock().map_err(to_error)?;
+    let existing: Vec<String> = playlists::list(&library)
+        .map_err(to_error)?
+        .into_iter()
+        .map(|playlist| playlist.name)
+        .collect();
+
+    let mut created = 0;
+    for (name, rules) in playlists::presets() {
+        if existing.iter().any(|current| current == name) {
+            continue;
+        }
+        playlists::create_smart(&library, name, &rules).map_err(to_error)?;
+        created += 1;
+    }
+    Ok(created)
+}
+
+#[tauri::command]
+fn delete_playlist(state: State<'_, Arc<AppState>>, playlist_id: i64) -> Fallible<()> {
+    let library = state.library.lock().map_err(to_error)?;
+    playlists::delete(&library, playlist_id).map_err(to_error)
 }
 
 /// Build a set that flows from one track, using the tempo, key and loudness the
@@ -868,7 +924,11 @@ pub fn run() {
             start_analysis,
             collection_health,
             health_tracks,
-            build_set
+            build_set,
+            list_playlists,
+            playlist_tracks,
+            add_preset_playlists,
+            delete_playlist
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

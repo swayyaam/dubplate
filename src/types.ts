@@ -202,6 +202,15 @@ export interface CollectionHealth {
   bitDepths: Bucket[];
 }
 
+export interface PlaylistRow {
+  id: number;
+  name: string;
+  isSmart: boolean;
+  createdAt: number;
+  /** Resolved live for smart playlists, counted for plain ones. */
+  trackCount: number;
+}
+
 /** One track in a generated set, and why it follows the last. */
 export interface FlowStep {
   track: TrackRow;
@@ -228,4 +237,5 @@ export type View =
   | "playing"
   | "queue"
   | "signal"
-  | "health";
+  | "health"
+  | "playlists";
