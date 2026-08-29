@@ -1,13 +1,25 @@
 //! Filesystem scanning and library indexing for dubplate.
 //!
-//! Phase 0 is a read-only walk: find audio files, read their tags, hand them to
-//! the UI. The SQLite index, incremental scanning and move detection arrive in
-//! phase 1; this crate is where they will live.
+//! The filesystem is the source of truth and this index is a cache. Deleting
+//! the database and rescanning must lose nothing except play counts and
+//! history, so nothing stored here is unrecoverable from disk.
 //!
-//! Nothing here ever writes to the user's files.
+//! Nothing in this crate ever writes to the user's audio files.
 
+pub mod artwork;
+pub mod db;
+pub mod index;
+pub mod model;
+pub mod query;
 pub mod scan;
 pub mod track;
+pub mod watch;
 
+pub use artwork::{ArtworkCache, ArtworkReport};
+pub use db::Library;
+pub use index::{sync, SyncReport};
+pub use model::TrackRow;
+pub use query::{list_tracks, search};
 pub use scan::{scan_folder, AUDIO_EXTENSIONS};
 pub use track::{Lossiness, ScanError, ScanReport, ScannedTrack};
+pub use watch::{watch, LibraryWatcher, DEFAULT_DEBOUNCE};

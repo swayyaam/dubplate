@@ -51,17 +51,22 @@ fn has_audio_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Walk `root` in parallel and read tags from every audio file found.
-///
-/// The walk and the tag reads are both parallel because a 10,000 file scan is
-/// meant to finish in single-digit seconds. Unreadable files land in
-/// `ScanReport::errors` instead of stopping the scan.
-pub fn scan_folder(root: &Path) -> ScanReport {
-    let started = Instant::now();
+/// One audio file as the walk found it, before any tag has been read.
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub path: PathBuf,
+    pub size: u64,
+    /// Unix seconds. With `size`, this is the incremental-scan skip key.
+    pub mtime: i64,
+}
 
-    // Phase one: walk. jwalk parallelises the directory traversal; we take size
-    // and mtime from the walk's own stat so the tag pass does not stat again.
-    let candidates: Vec<(PathBuf, u64, i64)> = WalkDir::new(root)
+/// Walk `root` and return every audio file, without opening any of them.
+///
+/// Split out from `scan_folder` because an incremental sync needs the cheap
+/// half: it compares (path, mtime, size) against the index and only reads tags
+/// for files that actually changed.
+pub fn walk(root: &Path) -> Vec<FileEntry> {
+    WalkDir::new(root)
         .skip_hidden(true)
         // Prune package directories before descending, so their contents are
         // never stat'd at all.
@@ -88,16 +93,48 @@ pub fn scan_folder(root: &Path) -> ScanReport {
                     (meta.len(), mtime)
                 })
                 .unwrap_or((0, 0));
-            (path, size, mtime)
+            FileEntry { path, size, mtime }
         })
-        .collect();
+        .collect()
+}
+
+/// A cheap identity for a file's contents: size plus a hash of the first 64KB.
+///
+/// Enough to recognise the same audio at a new path so a rename or a
+/// reorganised folder keeps its play count, without hashing gigabytes. Two
+/// different files sharing a size *and* a 64KB prefix would collide, which in
+/// practice means re-tagged copies of the same audio -- acceptable, since the
+/// key is only ever used to match a vanished path against a new one.
+pub fn content_key(path: &Path, size: u64) -> std::io::Result<String> {
+    use std::io::Read;
+
+    let mut head = Vec::with_capacity(64 * 1024);
+    std::fs::File::open(path)?
+        .take(64 * 1024)
+        .read_to_end(&mut head)?;
+
+    let digest = blake3::hash(&head);
+    Ok(format!("{size:x}-{}", &digest.to_hex()[..32]))
+}
+
+/// Walk `root` in parallel and read tags from every audio file found.
+///
+/// The walk and the tag reads are both parallel because a 10,000 file scan is
+/// meant to finish in single-digit seconds. Unreadable files land in
+/// `ScanReport::errors` instead of stopping the scan.
+pub fn scan_folder(root: &Path) -> ScanReport {
+    let started = Instant::now();
+
+    // Phase one: walk. jwalk parallelises the directory traversal; we take size
+    // and mtime from the walk's own stat so the tag pass does not stat again.
+    let candidates = walk(root);
 
     let files_seen = candidates.len();
 
     // Phase two: read tags in parallel. This is the expensive half.
     let results: Vec<Result<ScannedTrack, ScanError>> = candidates
         .into_par_iter()
-        .map(|(path, size, mtime)| read_track(&path, size, mtime))
+        .map(|entry| read_track(&entry.path, entry.size, entry.mtime))
         .collect();
 
     let mut tracks = Vec::with_capacity(results.len());
@@ -146,7 +183,7 @@ fn sort_tracks(tracks: &mut [ScannedTrack]) {
     });
 }
 
-fn read_track(path: &Path, size: u64, mtime: i64) -> Result<ScannedTrack, ScanError> {
+pub(crate) fn read_track(path: &Path, size: u64, mtime: i64) -> Result<ScannedTrack, ScanError> {
     let tagged = probe(path).map_err(|message| ScanError {
         path: path.to_string_lossy().into_owned(),
         message,

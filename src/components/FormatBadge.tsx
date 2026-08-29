@@ -1,5 +1,5 @@
 import { memo } from "react";
-import type { ScannedTrack } from "../types";
+import type { TrackRow } from "../types";
 import { formatSpec } from "../lib/format";
 
 /**
@@ -10,7 +10,7 @@ import { formatSpec } from "../lib/format";
  * difference rather than a green/amber signal. Those two colours stay reserved
  * for the bit-perfect verdict in the signal path panel.
  */
-function FormatBadgeImpl({ track }: { track: ScannedTrack }) {
+function FormatBadgeImpl({ track }: { track: TrackRow }) {
   const spec = formatSpec(track);
   return (
     <span className={`badge badge--${track.lossiness}`} title={describe(track)}>
@@ -20,7 +20,7 @@ function FormatBadgeImpl({ track }: { track: ScannedTrack }) {
   );
 }
 
-function describe(track: ScannedTrack): string {
+function describe(track: TrackRow): string {
   const parts: string[] = [track.codec.toUpperCase()];
   if (track.lossiness === "lossless") parts.push("lossless");
   if (track.lossiness === "lossy") parts.push("lossy");

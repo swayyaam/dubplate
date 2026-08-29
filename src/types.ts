@@ -1,12 +1,12 @@
-/** Mirrors `dubplate_library::track`. Keep in sync with crates/library/src/track.rs. */
+/** Mirrors `dubplate_library::model` and the Tauri command layer. */
 
 export type Lossiness = "lossless" | "lossy" | "unknown";
 
-export interface ScannedTrack {
+export interface TrackRow {
+  id: number;
   path: string;
   fileName: string;
   size: number;
-  mtime: number;
 
   title: string | null;
   artist: string | null;
@@ -25,6 +25,13 @@ export interface ScannedTrack {
   bitDepth: number | null;
   channels: number | null;
   bitrate: number | null;
+
+  /** Key into the artwork cache, or null if the album has no cover. */
+  artHash: string | null;
+  playCount: number;
+  loved: boolean;
+  addedAt: number;
+  lastPlayed: number | null;
 }
 
 export interface ScanError {
@@ -32,10 +39,34 @@ export interface ScanError {
   message: string;
 }
 
-export interface ScanReport {
+export interface SyncReport {
   root: string;
-  tracks: ScannedTrack[];
-  errors: ScanError[];
   filesSeen: number;
+  added: number;
+  updated: number;
+  /** Recognised at a new path by content, so play counts survived. */
+  moved: number;
+  removed: number;
+  /** Skipped because (mtime, size) still matched the index. */
+  unchanged: number;
+  errors: ScanError[];
   elapsedMs: number;
+}
+
+export interface ArtworkReport {
+  albumsChecked: number;
+  artFound: number;
+  artMissing: number;
+  errors: ScanError[];
+  elapsedMs: number;
+}
+
+export interface SyncOutcome {
+  sync: SyncReport;
+  artwork: ArtworkReport;
+}
+
+export interface LibraryStatus {
+  root: string | null;
+  trackCount: number;
 }

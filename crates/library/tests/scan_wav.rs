@@ -1,34 +1,9 @@
+mod common;
+
 use std::fs;
-use std::io::Write;
-use std::path::Path;
 
+use common::write_wav;
 use dubplate_library::{scan_folder, Lossiness};
-
-/// Canonical 44-byte PCM WAV header plus silence. Enough for lofty to report
-/// real stream properties, and it keeps the test free of binary fixtures.
-fn write_wav(path: &Path, sample_rate: u32, bits: u16, channels: u16, frames: u32) {
-    let block_align = channels * bits / 8;
-    let byte_rate = sample_rate * u32::from(block_align);
-    let data_len = frames * u32::from(block_align);
-
-    let mut out = Vec::new();
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&byte_rate.to_le_bytes());
-    out.extend_from_slice(&block_align.to_le_bytes());
-    out.extend_from_slice(&bits.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
-    out.resize(out.len() + data_len as usize, 0);
-
-    let mut file = fs::File::create(path).unwrap();
-    file.write_all(&out).unwrap();
-}
 
 #[test]
 fn reads_stream_properties_from_a_wav() {

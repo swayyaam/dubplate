@@ -1,13 +1,13 @@
 import { memo, useCallback, useEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { ScannedTrack } from "../types";
+import type { TrackRow } from "../types";
 import { formatDuration, trackAlbum, trackArtist, trackTitle } from "../lib/format";
 import { FormatBadge } from "./FormatBadge";
 
 const ROW_HEIGHT = 44;
 
 interface Props {
-  tracks: ScannedTrack[];
+  tracks: TrackRow[];
   selected: number;
   onSelect: (index: number) => void;
 }
@@ -96,7 +96,7 @@ export function TrackTable({ tracks, selected, onSelect }: Props) {
         <div className="table__canvas" style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((item) => (
             <Row
-              key={item.key}
+              key={tracks[item.index].id}
               track={tracks[item.index]}
               index={item.index}
               offset={item.start}
@@ -111,7 +111,7 @@ export function TrackTable({ tracks, selected, onSelect }: Props) {
 }
 
 interface RowProps {
-  track: ScannedTrack;
+  track: TrackRow;
   index: number;
   offset: number;
   isSelected: boolean;

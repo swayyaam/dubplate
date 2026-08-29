@@ -1,4 +1,4 @@
-import type { ScannedTrack } from "../types";
+import type { TrackRow } from "../types";
 
 /** 3:42, or 1:02:15 once it passes an hour. */
 export function formatDuration(ms: number): string {
@@ -43,7 +43,7 @@ export function formatKhz(sampleRate: number): string {
  * Lossy codecs deliberately have no depth to show -- they store frequency
  * coefficients, not samples -- so they get a bitrate instead.
  */
-export function formatSpec(track: ScannedTrack): string | null {
+export function formatSpec(track: TrackRow): string | null {
   const { bitDepth, sampleRate, bitrate, lossiness } = track;
   if (lossiness === "lossy") return bitrate ? `${bitrate}k` : null;
   if (bitDepth && sampleRate) return `${bitDepth}/${formatKhz(sampleRate)}`;
@@ -51,16 +51,16 @@ export function formatSpec(track: ScannedTrack): string | null {
   return null;
 }
 
-export function trackTitle(track: ScannedTrack): string {
+export function trackTitle(track: TrackRow): string {
   const title = track.title?.trim();
   if (title) return title;
   return track.fileName.replace(/\.[^.]+$/, "");
 }
 
-export function trackArtist(track: ScannedTrack): string {
+export function trackArtist(track: TrackRow): string {
   return track.artist?.trim() || track.albumArtist?.trim() || "Unknown artist";
 }
 
-export function trackAlbum(track: ScannedTrack): string {
+export function trackAlbum(track: TrackRow): string {
   return track.album?.trim() || "";
 }
