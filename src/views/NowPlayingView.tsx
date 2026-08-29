@@ -6,6 +6,7 @@ import { Waveform } from "../components/Waveform";
 import { formatDuration, formatKhz, trackArtist, trackTitle } from "../lib/format";
 import { usePlayer } from "../lib/playerStore";
 import { loadWaveform, peekWaveform } from "../lib/waveforms";
+import type { WaveformData } from "../lib/waveforms";
 
 interface Props {
   trackById: Map<number, TrackRow>;
@@ -21,7 +22,7 @@ interface Props {
 export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) {
   const state = usePlayer();
   const trackId = state?.trackId ?? null;
-  const [peaks, setPeaks] = useState<number[] | null>(null);
+  const [peaks, setPeaks] = useState<WaveformData | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
   const [building, setBuilding] = useState(false);
 
@@ -70,7 +71,7 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
 
       <div className="playing__seek">
         <Waveform
-          peaks={peaks}
+          data={peaks}
           progress={progress}
           height={72}
           onScrub={setScrub}

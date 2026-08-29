@@ -15,7 +15,7 @@ use rusqlite::params;
 use serde::Serialize;
 
 use crate::analyse::{analyse, TrackAnalysis};
-use crate::peaks_cache::PeaksCache;
+use crate::waveform_cache::WaveformCache;
 
 /// A track waiting to be analysed.
 #[derive(Debug, Clone)]
@@ -120,7 +120,7 @@ pub fn analyse_all(pending: &[PendingTrack], threads: usize) -> Vec<AnalysedTrac
 /// Write a finished batch: peaks to disk, everything else to the index.
 pub fn store_all(
     library: &mut Library,
-    peaks: &PeaksCache,
+    waveforms: &WaveformCache,
     results: &[AnalysedTrack],
 ) -> Result<BatchReport> {
     let started = Instant::now();
@@ -134,9 +134,9 @@ pub fn store_all(
     for result in results {
         match &result.analysis {
             Some(analysis) => {
-                // Peaks are a thousand floats; they belong on disk, not in a
-                // column that every track query would carry.
-                let _ = peaks.write(&result.content_key, &analysis.peaks);
+                // Five thousand bytes per track; they belong on disk, not in
+                // a column that every track query would carry.
+                let _ = waveforms.write(&result.content_key, &analysis.waveform);
                 store(&tx, result.id, analysis, now)?;
                 report.analysed += 1;
             }
@@ -163,7 +163,7 @@ pub fn store_all(
 /// uses the three parts so it can hold the lock for as little as possible.
 pub fn run_batch(
     library: &mut Library,
-    peaks: &PeaksCache,
+    waveforms: &WaveformCache,
     batch: usize,
     threads: usize,
 ) -> Result<BatchReport> {
@@ -172,7 +172,7 @@ pub fn run_batch(
         return Ok(BatchReport::default());
     }
     let results = analyse_all(&pending, threads);
-    store_all(library, peaks, &results)
+    store_all(library, waveforms, &results)
 }
 
 fn store(

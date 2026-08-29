@@ -4,6 +4,7 @@ import type { PlayerState, RepeatMode, TrackRow } from "../types";
 import { formatDuration, formatKhz, trackArtist, trackTitle } from "../lib/format";
 import { usePlayer } from "../lib/playerStore";
 import { loadWaveform, peekWaveform } from "../lib/waveforms";
+import type { WaveformData } from "../lib/waveforms";
 import { Cover } from "./Cover";
 import { Waveform } from "./Waveform";
 
@@ -25,7 +26,7 @@ export const Transport = memo(function Transport({
 }: Props) {
   const state = usePlayer();
   const trackId = state?.trackId ?? null;
-  const [peaks, setPeaks] = useState<number[] | null>(null);
+  const [peaks, setPeaks] = useState<WaveformData | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
 
   useEffect(() => {
@@ -80,7 +81,7 @@ export const Transport = memo(function Transport({
         <span className="transport__time">{formatDuration(position)}</span>
         <div className="transport__wave">
           <Waveform
-            peaks={peaks}
+            data={peaks}
             progress={progress}
             height={30}
             onScrub={setScrub}

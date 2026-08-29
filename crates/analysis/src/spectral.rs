@@ -17,6 +17,14 @@ const HOP: usize = 512;
 /// How far below the musical reference level a bin still counts as real energy.
 const FLOOR_DB: f32 = 60.0;
 
+/// Where the waveform's three colour bands meet, in Hz.
+///
+/// 200Hz keeps the kick and the bassline together and everything else out;
+/// 2kHz puts hats, snare crack and air above it. These are display bands, not
+/// crossover points -- the aim is that a breakdown looks different from a drop,
+/// not that the split is defensible as filter design.
+const BAND_SPLIT_HZ: [f32; 2] = [200.0, 2_000.0];
+
 pub struct SpectrumCollector {
     fft: Arc<dyn Fft<f32>>,
     rate: u32,
@@ -28,6 +36,13 @@ pub struct SpectrumCollector {
     previous: Vec<f32>,
     flux: Vec<f32>,
     chroma: [f64; 12],
+    /// Low/mid/high spectral density per window, in step with `flux`. The
+    /// waveform colours its columns from this.
+    bands: Vec<[f32; 3]>,
+    band_edges: [usize; 2],
+    /// Bins in each band. The high band spans a hundred times as many bins as
+    /// the low one, so a plain sum would measure bandwidth rather than energy.
+    band_bins: [f32; 3],
 }
 
 /// What the spectrum says about the file.
@@ -48,6 +63,7 @@ pub struct SpectrumSummary {
 impl SpectrumCollector {
     pub fn new(rate: u32) -> Self {
         let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
+        let edges = [bin_for(BAND_SPLIT_HZ[0], rate), bin_for(BAND_SPLIT_HZ[1], rate)];
         // Hann, so leakage does not smear a cliff into a slope.
         let window = (0..FFT_SIZE)
             .map(|n| {
@@ -66,6 +82,14 @@ impl SpectrumCollector {
             previous: vec![0.0; FFT_SIZE / 2 + 1],
             flux: Vec::new(),
             chroma: [0.0; 12],
+            bands: Vec::new(),
+            band_edges: edges,
+            band_bins: [
+                // Bin 0 is DC and is not counted.
+                (edges[0] - 1).max(1) as f32,
+                (edges[1] - edges[0]).max(1) as f32,
+                (FFT_SIZE / 2 + 1 - edges[1]).max(1) as f32,
+            ],
         }
     }
 
@@ -90,9 +114,25 @@ impl SpectrumCollector {
 
         let bins = self.magnitude_sum.len();
         let mut flux = 0.0f32;
+        let mut bands = [0.0f32; 3];
         for bin in 0..bins {
             let magnitude = self.scratch[bin].norm();
             self.magnitude_sum[bin] += magnitude as f64;
+
+            // Bin 0 is DC, not sound -- skip it, or a file with any offset
+            // reads as permanently bass-heavy.
+            if bin > 0 {
+                let band = if bin < self.band_edges[0] {
+                    0
+                } else if bin < self.band_edges[1] {
+                    1
+                } else {
+                    2
+                };
+                // Power, not magnitude: summing magnitudes lets a thousand
+                // near-silent bins outweigh a handful of loud ones.
+                bands[band] += magnitude * magnitude;
+            }
 
             // Spectral flux: only rises count, because an onset is energy
             // appearing, not energy fading.
@@ -107,6 +147,12 @@ impl SpectrumCollector {
             }
         }
         self.flux.push(flux);
+        // Per bin, so the bands are comparable to each other regardless of how
+        // wide they are: this is spectral density, not total energy.
+        for (value, count) in bands.iter_mut().zip(self.band_bins.iter()) {
+            *value /= count;
+        }
+        self.bands.push(bands);
         self.windows += 1;
     }
 
@@ -122,6 +168,12 @@ impl SpectrumCollector {
     /// Onsets per window, and how many windows there are per second.
     pub fn onset_envelope(&self) -> &[f32] {
         &self.flux
+    }
+
+    /// Low/mid/high spectral density per window, one entry per
+    /// `onset_envelope` entry.
+    pub fn band_trace(&self) -> &[[f32; 3]] {
+        &self.bands
     }
 
     pub fn hops_per_second(&self) -> f32 {
@@ -257,6 +309,11 @@ fn score(cutoff_hz: f32, rolloff_db: f32, rate: u32) -> f32 {
     };
 
     (steepness * plausibility * bandwidth).clamp(0.0, 1.0)
+}
+
+/// FFT bin holding a frequency, clamped to the half-spectrum.
+fn bin_for(hz: f32, rate: u32) -> usize {
+    ((hz * FFT_SIZE as f32 / rate as f32).round() as usize).min(FFT_SIZE / 2)
 }
 
 /// Strongest level anywhere in a band, or `None` if the band is empty.

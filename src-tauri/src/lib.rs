@@ -8,7 +8,7 @@ use dubplate_audio::engine::{
 };
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
-use dubplate_analysis::{pipeline, PeaksCache};
+use dubplate_analysis::{pipeline, WaveformCache};
 use dubplate_library::{
     flow, health, history, index, playlists, query, watch, AlbumRow, CollectionHealth, FlowStep,
     Library, LibraryWatcher, Listen, PlaylistRow, SyncReport, TrackRow,
@@ -26,9 +26,6 @@ const VIEW_KEY: &str = "last_view";
 /// Exclusive mode, rate handling and ReplayGain. Per-machine rather than
 /// per-library, but the index is where this app keeps its state.
 const OUTPUT_KEY: &str = "output_settings";
-/// Buckets in a waveform. Enough detail for a full-width seek bar, small enough
-/// to send over IPC without thinking about it.
-const WAVEFORM_BUCKETS: usize = 1000;
 /// Tracks per analysis batch. Small enough that stopping is responsive, large
 /// enough that the thread pool is worth building.
 const ANALYSIS_BATCH: usize = 16;
@@ -46,7 +43,7 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 struct AppState {
     library: Mutex<Library>,
     artwork: ArtworkCache,
-    peaks: PeaksCache,
+    waveforms: WaveformCache,
     watcher: Mutex<Option<LibraryWatcher>>,
     engine: Engine,
     /// Guards against two analysis passes running at once.
@@ -289,12 +286,18 @@ async fn accent_color(state: State<'_, Arc<AppState>>, hash: String) -> Fallible
     .map_err(to_error)?
 }
 
-/// Peaks for the seek bar.
+/// The waveform for the seek bar, as raw bytes.
 ///
-/// From the analysis cache when the track has been analysed, which is free.
-/// Otherwise decoded on demand, which costs about a tenth of a second.
+/// Bytes rather than JSON: five lanes of a thousand values would be a 20KB
+/// number-by-number array on the wire, and the canvas wants typed arrays at the
+/// other end anyway.
+///
+/// A miss runs the full analysis for that one track rather than a waveform-only
+/// decode. It costs the same -- decoding is the expensive part and this is the
+/// same single pass -- and it means playing an unanalysed track fills in its
+/// loudness, tempo and key too, instead of throwing that work away.
 #[tauri::command]
-async fn waveform(state: State<'_, Arc<AppState>>, track_id: i64) -> Fallible<Vec<f32>> {
+async fn waveform(state: State<'_, Arc<AppState>>, track_id: i64) -> Fallible<tauri::ipc::Response> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let (path, content_key): (String, String) = {
@@ -308,11 +311,25 @@ async fn waveform(state: State<'_, Arc<AppState>>, track_id: i64) -> Fallible<Ve
                 )
                 .map_err(to_error)?
         };
-        if let Some(cached) = state.peaks.read(&content_key) {
-            return Ok(cached);
+        if let Some(bytes) = state.waveforms.read_bytes(&content_key) {
+            return Ok(tauri::ipc::Response::new(bytes));
         }
-        dubplate_audio::peaks::compute(std::path::Path::new(&path), WAVEFORM_BUCKETS)
-            .map_err(to_error)
+
+        // Analysed outside the lock, then stored under it, for the same reason
+        // the batch runner does: a decode must never hold up a query.
+        let analysis = dubplate_analysis::analyse(std::path::Path::new(&path)).map_err(to_error)?;
+        let bytes = analysis.waveform.to_bytes();
+        let result = pipeline::AnalysedTrack {
+            id: track_id,
+            content_key,
+            analysis: Some(analysis),
+        };
+        {
+            let mut library = state.library.lock().map_err(to_error)?;
+            pipeline::store_all(&mut library, &state.waveforms, std::slice::from_ref(&result))
+                .map_err(to_error)?;
+        }
+        Ok(tauri::ipc::Response::new(bytes))
     })
     .await
     .map_err(to_error)?
@@ -391,7 +408,7 @@ fn run_analysis(app: &AppHandle, state: &Arc<AppState>) {
             let Ok(mut library) = state.library.lock() else {
                 return;
             };
-            match pipeline::store_all(&mut library, &state.peaks, &results) {
+            match pipeline::store_all(&mut library, &state.waveforms, &results) {
                 Ok(report) => report,
                 Err(_) => return,
             }
@@ -788,7 +805,7 @@ pub fn run() {
             let state = Arc::new(AppState {
                 library: Mutex::new(library),
                 artwork,
-                peaks: PeaksCache::new(data_dir.join("waveforms")),
+                waveforms: WaveformCache::new(data_dir.join("waveforms")),
                 watcher: Mutex::new(None),
                 engine: Engine::spawn(),
                 analysing: AtomicBool::new(false),

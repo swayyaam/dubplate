@@ -2,6 +2,7 @@
 //!
 //!     cargo run --release -p dubplate-analysis --example analyse -- file.flac ...
 //!     cargo run --release -p dubplate-analysis --example analyse -- --sweep ~/Music/DJ
+//!     cargo run --release -p dubplate-analysis --example analyse -- --waveform file.flac
 //!
 //! The sweep is the check that matters: transcode scoring is only trustworthy
 //! if it stays quiet on a library of genuine files.
@@ -18,6 +19,12 @@ fn main() -> anyhow::Result<()> {
         let root = args.get(1).map(|r| expand(r)).unwrap_or_default();
         return sweep(Path::new(&root));
     }
+    if args.first().map(|a| a == "--waveform").unwrap_or(false) {
+        for arg in &args[1..] {
+            waveform_report(Path::new(&expand(arg)));
+        }
+        return Ok(());
+    }
     if args.first().map(|a| a == "--pipeline").unwrap_or(false) {
         let root = args.get(1).map(|r| expand(r)).unwrap_or_default();
         return pipeline_run(Path::new(&root));
@@ -26,6 +33,76 @@ fn main() -> anyhow::Result<()> {
         report(Path::new(&expand(arg)));
     }
     Ok(())
+}
+
+/// What the seek bar will actually draw, and whether it has any shape to it.
+fn waveform_report(path: &Path) {
+    println!("── {}", path.file_name().unwrap_or_default().to_string_lossy());
+    let Ok(result) = analyse(path) else {
+        println!("   would not decode");
+        return;
+    };
+    let w = &result.waveform;
+    let spread = |lane: &[u8]| {
+        let min = lane.iter().copied().min().unwrap_or(0) as i32;
+        let max = lane.iter().copied().max().unwrap_or(0) as i32;
+        let mean = lane.iter().map(|v| *v as f64).sum::<f64>() / lane.len() as f64;
+        let variance = lane
+            .iter()
+            .map(|v| (*v as f64 - mean).powi(2))
+            .sum::<f64>()
+            / lane.len() as f64;
+        (min, max, mean, variance.sqrt())
+    };
+    for (name, lane) in [("peak", &w.peak), ("rms", &w.rms)] {
+        let (min, max, mean, sd) = spread(lane);
+        println!("   {name:<5} min {min:>3}  max {max:>3}  mean {mean:>6.1}  sd {sd:>5.1}");
+    }
+    let bands = |lane: &Vec<u8>| lane.iter().map(|v| *v as f64).sum::<f64>() / lane.len() as f64;
+    println!(
+        "   bands  low {:.0}%  mid {:.0}%  high {:.0}%",
+        bands(&w.low) / 2.55,
+        bands(&w.mid) / 2.55,
+        bands(&w.high) / 2.55
+    );
+    for (name, lane) in [("low", &w.low), ("mid", &w.mid), ("high", &w.high)] {
+        let (min, max, _, sd) = spread(lane);
+        println!("   {name:<5} min {min:>3}  max {max:>3}  sd {sd:>5.1}");
+    }
+    // A coarse picture of the track, so the shape is visible without a canvas.
+    let glyphs = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+    for (name, lane) in [("peak", &w.peak), ("rms ", &w.rms)] {
+        let row: String = (0..100)
+            .map(|column| {
+                let from = column * lane.len() / 100;
+                let to = ((column + 1) * lane.len() / 100).max(from + 1);
+                let value = lane[from..to].iter().copied().max().unwrap_or(0) as usize;
+                // Same floor the canvas uses, so this is what you would see.
+                let db = (value as f32 / 255.0) * 60.0 - 60.0;
+                let level = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
+                glyphs[(level * 9.0).round() as usize]
+            })
+            .collect();
+        println!("   {name} |{row}|");
+    }
+    // Which band leads each column. A constant row here means the colour is a
+    // tint rather than information.
+    let leads: String = (0..100)
+        .map(|column| {
+            let from = column * w.low.len() / 100;
+            let to = ((column + 1) * w.low.len() / 100).max(from + 1);
+            let sum = |lane: &Vec<u8>| lane[from..to].iter().map(|v| *v as u32).sum::<u32>();
+            let (l, m, h) = (sum(&w.low), sum(&w.mid), sum(&w.high));
+            if l >= m && l >= h {
+                'L'
+            } else if m >= h {
+                'M'
+            } else {
+                'H'
+            }
+        })
+        .collect();
+    println!("   band |{leads}|");
 }
 
 fn report(path: &Path) {
@@ -189,7 +266,7 @@ fn expand(path: &str) -> String {
 /// Index a folder, then analyse it in batches the way the app does, and check
 /// the results actually landed in the database.
 fn pipeline_run(root: &Path) -> anyhow::Result<()> {
-    use dubplate_analysis::{pipeline, PeaksCache};
+    use dubplate_analysis::{pipeline, WaveformCache};
     use dubplate_library::{index, Library};
 
     // Stable rather than per-process: running this twice should demonstrate
@@ -197,7 +274,7 @@ fn pipeline_run(root: &Path) -> anyhow::Result<()> {
     let work = std::env::temp_dir().join("dubplate-analysis-workdir");
     std::fs::create_dir_all(&work)?;
     let mut library = Library::open(work.join("library.sqlite"))?;
-    let peaks = PeaksCache::new(work.join("waveforms"));
+    let waveforms = WaveformCache::new(work.join("waveforms"));
 
     let sync = index::sync(&mut library, root)?;
     println!("indexed         {} tracks in {} ms", sync.added, sync.elapsed_ms);
@@ -206,7 +283,7 @@ fn pipeline_run(root: &Path) -> anyhow::Result<()> {
     let started = Instant::now();
     let mut batches = 0usize;
     loop {
-        let report = pipeline::run_batch(&mut library, &peaks, 32, 6)?;
+        let report = pipeline::run_batch(&mut library, &waveforms, 32, 6)?;
         if report.analysed == 0 && report.failed == 0 {
             break;
         }
@@ -221,7 +298,7 @@ fn pipeline_run(root: &Path) -> anyhow::Result<()> {
     println!("\nanalysed all in {:.1}s over {batches} batches", started.elapsed().as_secs_f64());
 
     // Resumability: with nothing left, another pass must do no work at all.
-    let again = pipeline::run_batch(&mut library, &peaks, 32, 6)?;
+    let again = pipeline::run_batch(&mut library, &waveforms, 32, 6)?;
     println!("second pass     {} analysed, {} failed (resumable)", again.analysed, again.failed);
 
     let conn = library.connection();
@@ -251,7 +328,7 @@ fn pipeline_run(root: &Path) -> anyhow::Result<()> {
     println!("sample rates    {:?}", health.sample_rates.iter().map(|b| (&b.label, b.count)).collect::<Vec<_>>());
     println!("bit depths      {:?}", health.bit_depths.iter().map(|b| (&b.label, b.count)).collect::<Vec<_>>());
 
-    let waveforms = std::fs::read_dir(peaks.root())
+    let waveforms = std::fs::read_dir(waveforms.root())
         .map(|entries| {
             entries
                 .flatten()

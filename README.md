@@ -48,16 +48,30 @@ Working today:
 - Exclusive (hog) mode, three sample-rate modes, a high-quality FFT resampler
 - ReplayGain measured and applied, held back by true peak so it cannot clip
 - Signal path panel built on what the hardware reports, with a verdict
-- Analysis pipeline: one decode pass gives loudness, waveform peaks, effective
+- Analysis pipeline: one decode pass gives loudness, the waveform, effective
   bit depth, spectral cutoff, transcode score, tempo and key
 - Collection health: what is lossless, what is padded, what looks like a
   transcode, and the distribution of formats, rates and depths
 - Smart playlists whose rules are stored rather than their contents
 - "Build a set that flows from this track", using tempo, key and loudness
-- Album grid, album view, now playing, queue, waveform seek bar, command palette
+- Album grid, album view, now playing, queue, command palette
+- Waveform seek bar showing RMS, peak, and the low/mid/high mix as colour
 - One accent colour, sampled from the current cover
 
 Deliberately correct, because each is easy to get wrong:
+
+- **A peak-only waveform of a modern master is a rectangle.** Honestly so: the
+  loudest sample in any second of a brickwalled club track is the limiter
+  ceiling, every second. The seek bar draws RMS as the body, peak as an
+  outline, and the low/mid/high mix as colour, on a decibel scale with a fixed
+  floor. Fixed rather than per-track, so two tracks are comparable and a
+  squashed master is allowed to look squashed.
+- **Band energy has to be compared logarithmically.** Spectral density in music
+  falls roughly 30dB from the bass to the top octave, so a linear comparison
+  makes every track ever recorded read as pure bass; summing raw magnitudes
+  instead makes them all read as treble, because the top band spans a hundred
+  times as many FFT bins. Each band is scored against the loudest of the three
+  over a fixed window.
 
 - **Lossy codecs report no bit depth.** They decode to 32-bit float and have
   none; showing "16 bit" for an MP3 is meaningless.
@@ -111,7 +125,7 @@ going, and it is all here.
 ## Layout
 
 ```
-crates/analysis/  loudness, peaks, tempo, key, and format verification
+crates/analysis/  loudness, waveform, tempo, key, and format verification
 crates/audio/     ring buffer, output backends, decoding, the engine threads
 crates/library/   filesystem scanning, SQLite index, search, artwork cache, watcher
 src-tauri/        Tauri shell, commands, and the audio engine to come

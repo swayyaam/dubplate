@@ -12,12 +12,14 @@ use crate::depth::DepthProbe;
 use crate::key::{self, KeyEstimate};
 use crate::spectral::SpectrumCollector;
 use crate::tempo;
+use crate::waveform::Waveform;
 
 /// ReplayGain 2.0 targets -18 LUFS.
 const REFERENCE_LUFS: f64 = -18.0;
 
-/// Buckets in the stored waveform. Enough detail for a full-width seek bar.
-pub const PEAK_BUCKETS: usize = 1000;
+/// Frames per fine-grained waveform sample before it is collapsed into
+/// buckets. 256 at 44.1kHz is ~6ms, comfortably finer than a drum hit.
+const PEAK_WINDOW: usize = 256;
 
 /// Everything one pass produces.
 #[derive(Debug, Clone, Default)]
@@ -29,7 +31,8 @@ pub struct TrackAnalysis {
     /// True peak, 1.0 being full scale. Above 1.0 is legal in float and will
     /// clip a converter, which is exactly why the gain is limited by it.
     pub true_peak: Option<f32>,
-    pub peaks: Vec<f32>,
+    /// Level, body and band mix per column of the seek bar.
+    pub waveform: Waveform,
     pub declared_bits: Option<u32>,
     /// What the file actually uses. Below `declared_bits` means padding.
     pub effective_bits: Option<u32>,
@@ -70,12 +73,13 @@ pub fn analyse(path: &Path) -> Result<TrackAnalysis, DecodeError> {
     let mut depth = DepthProbe::new(format.bits_per_sample);
     let mut spectrum = SpectrumCollector::new(rate);
 
-    // Fine peaks first, collapsed to buckets at the end: the track length is
+    // Fine series first, collapsed to buckets at the end: the track length is
     // not known reliably in advance for every container.
     let mut fine_peaks: Vec<f32> = Vec::new();
+    let mut fine_squares: Vec<f32> = Vec::new();
     let mut window_peak = 0.0f32;
+    let mut window_square = 0.0f64;
     let mut window_frames = 0usize;
-    const PEAK_WINDOW: usize = 256;
 
     let mut mono = Vec::with_capacity(8192);
     let mut frames_total = 0u64;
@@ -92,17 +96,25 @@ pub fn analyse(path: &Path) -> Result<TrackAnalysis, DecodeError> {
         for frame in block.chunks(channels) {
             let mut peak = 0.0f32;
             let mut sum = 0.0f32;
+            let mut square = 0.0f32;
             for sample in frame {
                 peak = peak.max(sample.abs());
                 sum += *sample;
+                // Squared per channel rather than off the mono mix, so a
+                // hard-panned or out-of-phase moment keeps its energy instead
+                // of cancelling itself into a hole in the waveform.
+                square += *sample * *sample;
             }
             mono.push(sum / channels as f32);
 
             window_peak = window_peak.max(peak);
+            window_square += (square / channels as f32) as f64;
             window_frames += 1;
             if window_frames == PEAK_WINDOW {
                 fine_peaks.push(window_peak);
+                fine_squares.push((window_square / PEAK_WINDOW as f64) as f32);
                 window_peak = 0.0;
+                window_square = 0.0;
                 window_frames = 0;
             }
         }
@@ -111,6 +123,7 @@ pub fn analyse(path: &Path) -> Result<TrackAnalysis, DecodeError> {
     }
     if window_frames > 0 {
         fine_peaks.push(window_peak);
+        fine_squares.push((window_square / window_frames as f64) as f32);
     }
 
     let summary = spectrum.summarise();
@@ -131,7 +144,7 @@ pub fn analyse(path: &Path) -> Result<TrackAnalysis, DecodeError> {
         loudness_lufs: lufs,
         replay_gain_db: lufs.map(|value| (REFERENCE_LUFS - value) as f32),
         true_peak: true_peak.map(|value| value as f32),
-        peaks: downsample(&fine_peaks, PEAK_BUCKETS),
+        waveform: Waveform::build(&fine_peaks, &fine_squares, spectrum.band_trace()),
         declared_bits: depth.as_ref().map(|probe| probe.declared_bits()),
         effective_bits: depth.as_ref().and_then(|probe| probe.effective_bits()),
         spectral_cutoff: summary.cutoff_hz,
@@ -144,24 +157,4 @@ pub fn analyse(path: &Path) -> Result<TrackAnalysis, DecodeError> {
         sample_rate: rate,
         codec: format.codec.clone(),
     })
-}
-
-/// Collapse fine peaks into buckets, keeping the maximum of each span.
-///
-/// Maximum rather than mean: averaging a waveform turns transients into mush,
-/// and the transients are what makes it recognisable as a track.
-fn downsample(fine: &[f32], buckets: usize) -> Vec<f32> {
-    if fine.is_empty() {
-        return vec![0.0; buckets];
-    }
-    if fine.len() <= buckets {
-        return (0..buckets).map(|index| fine[index * fine.len() / buckets]).collect();
-    }
-    (0..buckets)
-        .map(|index| {
-            let from = index * fine.len() / buckets;
-            let to = ((index + 1) * fine.len() / buckets).max(from + 1).min(fine.len());
-            fine[from..to].iter().copied().fold(0.0f32, f32::max)
-        })
-        .collect()
 }
