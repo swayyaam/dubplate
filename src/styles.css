@@ -222,6 +222,167 @@ button, input { font: inherit; color: inherit; }
 }
 .notice--error { background: rgba(226, 104, 92, 0.1); color: var(--danger); }
 
+/* --- transport ------------------------------------------------------------ */
+
+.transport {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto minmax(220px, 2fr) minmax(0, auto);
+  align-items: center;
+  gap: 18px;
+  padding: 12px var(--gutter);
+  border-top: 1px solid var(--hairline);
+  background: var(--bg-raised);
+  user-select: none;
+}
+
+.transport__now { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.transport__title,
+.transport__artist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transport__title { font-size: 13px; }
+.transport__artist { font-size: 11.5px; color: var(--text-dim); }
+
+.transport__controls { display: flex; align-items: center; gap: 4px; }
+.transport__seek { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* justify-self keeps the last column inside the gutter; without it the volume
+   slider hangs off the right edge of the window. */
+.transport__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: end;
+}
+
+.transport__time {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 40px;
+  text-align: center;
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.icon:hover { background: var(--hover); color: var(--text); }
+.icon--on { color: var(--accent); }
+.icon { position: relative; }
+
+/* "repeat one" is the repeat glyph with a 1 on it, rather than a second icon
+   nobody can tell apart at 15px. */
+.icon__badge {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.icon--play {
+  width: 34px;
+  height: 34px;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 12px;
+}
+.icon--play:hover { background: #fff; color: var(--bg); }
+
+/* The seek bar. Phase 4 replaces the plain fill with the waveform peaks the
+   analysis pass computes, which is why the geometry lives in its own element. */
+.scrubber {
+  position: relative;
+  flex: 1;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+.scrubber::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.scrubber__fill {
+  position: absolute;
+  left: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.scrubber__head {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.scrubber:hover .scrubber__head { opacity: 1; }
+
+/* Codec and rate, always visible while playing, so "is this bit-perfect" is a
+   glance rather than a menu. Amber marks a rate conversion. */
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: help;
+}
+.chip__spec { color: var(--text-faint); font-weight: 500; font-variant-numeric: tabular-nums; }
+.chip--converted { background: var(--accent-soft); color: var(--accent); }
+.chip--converted .chip__spec { color: var(--accent); opacity: 0.7; }
+
+.volume {
+  width: 74px;
+  height: 18px;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+.volume::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+.volume::-webkit-slider-thumb {
+  appearance: none;
+  width: 9px;
+  height: 9px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.volume:hover::-webkit-slider-thumb { background: var(--text); }
+
+/* The row the engine is on, distinct from the row the keyboard is on. */
+.row--current .col--title { color: var(--accent); }
+.row--current .col--num { color: var(--accent); }
+
 /* --- status bar ----------------------------------------------------------- */
 
 .statusbar {

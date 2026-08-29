@@ -1,18 +1,39 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
+use dubplate_audio::engine::{Command, Engine, PlayerState, QueueItem, RepeatMode};
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
 use dubplate_library::{index, query, watch, Library, LibraryWatcher, SyncReport, TrackRow};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Key in the `app_state` table holding the folder the user chose.
 const ROOT_KEY: &str = "library_root";
+/// Queue, current track, position and volume, so a relaunch resumes where the
+/// last session stopped.
+const PLAYBACK_KEY: &str = "playback";
+/// How often playback state is written back. Often enough that a crash loses
+/// seconds, rarely enough that it is not writing during every frame.
+const SAVE_INTERVAL: Duration = Duration::from_secs(3);
 
 struct AppState {
     library: Mutex<Library>,
     artwork: ArtworkCache,
     watcher: Mutex<Option<LibraryWatcher>>,
+    engine: Engine,
+}
+
+/// The slice of playback worth surviving a restart.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SavedPlayback {
+    queue: Vec<i64>,
+    queue_index: usize,
+    position_ms: u64,
+    volume: f32,
+    repeat: String,
+    shuffle: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,6 +140,86 @@ async fn refresh_artwork(state: State<'_, Arc<AppState>>) -> Fallible<ArtworkRep
     .map_err(to_error)?
 }
 
+/// Start playing a set of tracks. Paths come from the index, not the UI, so a
+/// renamed file plays from wherever the last sync found it.
+#[tauri::command]
+fn play_tracks(state: State<'_, Arc<AppState>>, track_ids: Vec<i64>, start: usize) -> Fallible<()> {
+    let items = resolve_queue(&state, &track_ids)?;
+    if items.is_empty() {
+        return Err("None of those tracks are still in the library".into());
+    }
+    state.engine.send(Command::SetQueue {
+        items,
+        start: start.min(track_ids.len().saturating_sub(1)),
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn player_state(state: State<'_, Arc<AppState>>) -> PlayerState {
+    state.engine.snapshot()
+}
+
+#[tauri::command]
+fn toggle_play(state: State<'_, Arc<AppState>>) {
+    state.engine.send(Command::TogglePlay);
+}
+
+#[tauri::command]
+fn next_track(state: State<'_, Arc<AppState>>) {
+    state.engine.send(Command::Next);
+}
+
+#[tauri::command]
+fn previous_track(state: State<'_, Arc<AppState>>) {
+    state.engine.send(Command::Previous);
+}
+
+#[tauri::command]
+fn seek(state: State<'_, Arc<AppState>>, ms: u64) {
+    state.engine.send(Command::Seek { ms });
+}
+
+#[tauri::command]
+fn set_volume(state: State<'_, Arc<AppState>>, volume: f32) {
+    state.engine.send(Command::SetVolume(volume));
+}
+
+#[tauri::command]
+fn set_repeat(state: State<'_, Arc<AppState>>, mode: String) {
+    let mode = match mode.as_str() {
+        "all" => RepeatMode::All,
+        "one" => RepeatMode::One,
+        _ => RepeatMode::Off,
+    };
+    state.engine.send(Command::SetRepeat(mode));
+}
+
+#[tauri::command]
+fn set_shuffle(state: State<'_, Arc<AppState>>, shuffle: bool) {
+    state.engine.send(Command::SetShuffle(shuffle));
+}
+
+/// Turn track ids into playable queue items, keeping the caller's order and
+/// silently dropping anything the index no longer knows about.
+fn resolve_queue(state: &Arc<AppState>, track_ids: &[i64]) -> Fallible<Vec<QueueItem>> {
+    let library = state.library.lock().map_err(to_error)?;
+    let mut items = Vec::with_capacity(track_ids.len());
+    let mut stmt = library
+        .connection()
+        .prepare("SELECT path FROM tracks WHERE id = ?1")
+        .map_err(to_error)?;
+    for id in track_ids {
+        if let Ok(path) = stmt.query_row([id], |row| row.get::<_, String>(0)) {
+            items.push(QueueItem {
+                track_id: *id,
+                path,
+            });
+        }
+    }
+    Ok(items)
+}
+
 fn current_root(state: &Arc<AppState>) -> Fallible<Option<PathBuf>> {
     let library = state.library.lock().map_err(to_error)?;
     Ok(library
@@ -173,6 +274,69 @@ fn start_watching(app: AppHandle, state: Arc<AppState>, root: PathBuf) -> Fallib
     Ok(())
 }
 
+fn save_playback(state: &Arc<AppState>) {
+    let snapshot = state.engine.snapshot();
+    // Nothing worth restoring, and writing an empty queue would throw away what
+    // the last session left.
+    if snapshot.queue.is_empty() {
+        return;
+    }
+    let saved = SavedPlayback {
+        queue: snapshot.queue,
+        queue_index: snapshot.queue_index,
+        position_ms: snapshot.position_ms,
+        volume: snapshot.volume,
+        repeat: match snapshot.repeat {
+            RepeatMode::All => "all".into(),
+            RepeatMode::One => "one".into(),
+            RepeatMode::Off => "off".into(),
+        },
+        shuffle: snapshot.shuffle,
+    };
+    if let (Ok(library), Ok(json)) = (state.library.lock(), serde_json::to_string(&saved)) {
+        let _ = library.set_state(PLAYBACK_KEY, &json);
+    }
+}
+
+/// Put the queue back, at the track and position the last session stopped on.
+/// Deliberately does not start playing: launching an app should be quiet.
+fn restore_playback(state: &Arc<AppState>) {
+    let json = {
+        let Ok(library) = state.library.lock() else {
+            return;
+        };
+        match library.get_state(PLAYBACK_KEY) {
+            Ok(Some(json)) => json,
+            _ => return,
+        }
+    };
+    let Ok(saved) = serde_json::from_str::<SavedPlayback>(&json) else {
+        return;
+    };
+    let Ok(items) = resolve_queue(state, &saved.queue) else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+
+    state.engine.send(Command::SetVolume(saved.volume));
+    state.engine.send(Command::SetShuffle(saved.shuffle));
+    state.engine.send(Command::SetRepeat(match saved.repeat.as_str() {
+        "all" => RepeatMode::All,
+        "one" => RepeatMode::One,
+        _ => RepeatMode::Off,
+    }));
+    state.engine.send(Command::SetQueue {
+        items,
+        start: saved.queue_index,
+    });
+    state.engine.send(Command::Seek {
+        ms: saved.position_ms,
+    });
+    state.engine.send(Command::Pause);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -187,6 +351,7 @@ pub fn run() {
                 library: Mutex::new(library),
                 artwork,
                 watcher: Mutex::new(None),
+                engine: Engine::spawn(),
             });
 
             // Resume watching the folder from the last session, so changes made
@@ -197,6 +362,16 @@ pub fn run() {
                 }
             }
 
+            restore_playback(&state);
+
+            // Write playback back periodically rather than on every change: the
+            // position moves 30 times a second and the queue almost never does.
+            let saver = Arc::clone(&state);
+            std::thread::spawn(move || loop {
+                std::thread::sleep(SAVE_INTERVAL);
+                save_playback(&saver);
+            });
+
             app.manage(state);
             Ok(())
         })
@@ -206,7 +381,16 @@ pub fn run() {
             rescan,
             list_tracks,
             search_tracks,
-            refresh_artwork
+            refresh_artwork,
+            play_tracks,
+            player_state,
+            toggle_play,
+            next_track,
+            previous_track,
+            seek,
+            set_volume,
+            set_repeat,
+            set_shuffle
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

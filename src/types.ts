@@ -70,3 +70,33 @@ export interface LibraryStatus {
   root: string | null;
   trackCount: number;
 }
+
+export type RepeatMode = "off" | "all" | "one";
+
+/** What the file is, straight from the stream. Never from tags. */
+export interface SourceSnapshot {
+  codec: string;
+  sampleRate: number;
+  channels: number;
+  /** Null for lossy codecs, which have no bit depth at all. */
+  bitsPerSample: number | null;
+}
+
+export interface PlayerState {
+  playing: boolean;
+  trackId: number | null;
+  queue: number[];
+  queueIndex: number;
+  positionMs: number;
+  durationMs: number;
+  volume: number;
+  repeat: RepeatMode;
+  shuffle: boolean;
+  source: SourceSnapshot | null;
+  device: string | null;
+  /** What the device is running at, which is not always the file's rate. */
+  deviceSampleRate: number | null;
+  /** Non-zero means the decoder fell behind and the device ran dry. */
+  underruns: number;
+  error: string | null;
+}

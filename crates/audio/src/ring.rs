@@ -36,6 +36,9 @@ pub struct PlaybackShared {
     playing: AtomicBool,
     /// Callbacks that ran dry. Anything above zero means the decoder fell behind.
     underruns: AtomicU64,
+    /// Frames sitting in the ring, published by the decode thread so the
+    /// control thread can wait for a buffer before starting the device.
+    buffered_frames: AtomicU64,
 }
 
 impl Default for PlaybackShared {
@@ -54,6 +57,7 @@ impl PlaybackShared {
             target_gain_bits: AtomicU32::new(1.0f32.to_bits()),
             playing: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
+            buffered_frames: AtomicU64::new(0),
         }
     }
 
@@ -103,6 +107,16 @@ impl PlaybackShared {
     pub fn underruns(&self) -> u64 {
         self.underruns.load(Ordering::Relaxed)
     }
+
+    pub fn set_buffered_frames(&self, frames: u64) {
+        self.buffered_frames.store(frames, Ordering::Relaxed);
+    }
+
+    /// How much audio is queued. Used to hold the device closed until there is
+    /// something to play, rather than starting it into an empty ring.
+    pub fn buffered_frames(&self) -> u64 {
+        self.buffered_frames.load(Ordering::Relaxed)
+    }
 }
 
 /// Create the ring and the renderer that drains it.
@@ -113,10 +127,25 @@ pub fn open(
 ) -> (Producer<f32>, RingRenderer) {
     let capacity = ring_capacity_frames(sample_rate) * channels as usize;
     let (producer, consumer) = RingBuffer::<f32>::new(capacity);
+    // A brand new ring is already in the state the generation-change path would
+    // put it in: empty, and starting at the seek target. Say so explicitly.
+    //
+    // Doing this by pretending to be a generation behind would work too, but it
+    // would make the first callback discard whatever is in the ring -- harmless
+    // today only because the decoder waits for the acknowledgement below before
+    // writing. Setting the two values directly has no such dependency.
+    let generation = shared.generation();
+    shared
+        .frames_played
+        .store(shared.seek_target_frames(), Ordering::Relaxed);
+    shared
+        .drained_generation
+        .store(generation, Ordering::Release);
+
     let renderer = RingRenderer {
         consumer,
         gain: GainRamp::new(0.0, sample_rate, RAMP_MS),
-        local_generation: shared.generation(),
+        local_generation: generation,
         shared,
     };
     (producer, renderer)

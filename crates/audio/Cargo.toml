@@ -10,6 +10,7 @@ repository.workspace = true
 anyhow.workspace    = true
 cpal = "0.18.2"
 rtrb = "0.4.0"
+serde = { workspace = true, features = ["derive"] }
 symphonia = { version = "0.6.1", features = ["mp3", "aac", "alac", "isomp4", "aiff"] }
 thiserror.workspace = true
 tracing.workspace   = true

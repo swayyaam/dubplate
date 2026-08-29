@@ -10,6 +10,11 @@ interface Props {
   tracks: TrackRow[];
   selected: number;
   onSelect: (index: number) => void;
+  /** Double-click or Enter: start playing from this row. */
+  onActivate: (index: number) => void;
+  /** The track the engine is on, so the row can show it. */
+  playingId: number | null;
+  isPlaying: boolean;
 }
 
 /**
@@ -19,7 +24,7 @@ interface Props {
  * Arrow keys move the selection and pull it into view, so the list is fully
  * usable without the mouse.
  */
-export function TrackTable({ tracks, selected, onSelect }: Props) {
+export function TrackTable({ tracks, selected, onSelect, onActivate, playingId, isPlaying }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const virtualizer = useVirtualizer({
@@ -69,9 +74,13 @@ export function TrackTable({ tracks, selected, onSelect }: Props) {
           event.preventDefault();
           onSelect(tracks.length - 1);
           break;
+        case "Enter":
+          event.preventDefault();
+          onActivate(selected);
+          break;
       }
     },
-    [tracks.length, selected, onSelect],
+    [tracks.length, selected, onSelect, onActivate],
   );
 
   return (
@@ -101,7 +110,10 @@ export function TrackTable({ tracks, selected, onSelect }: Props) {
               index={item.index}
               offset={item.start}
               isSelected={item.index === selected}
+              isCurrent={tracks[item.index].id === playingId}
+              isPlaying={isPlaying}
               onSelect={onSelect}
+              onActivate={onActivate}
             />
           ))}
         </div>
@@ -115,20 +127,35 @@ interface RowProps {
   index: number;
   offset: number;
   isSelected: boolean;
+  isCurrent: boolean;
+  isPlaying: boolean;
   onSelect: (index: number) => void;
+  onActivate: (index: number) => void;
 }
 
-function RowImpl({ track, index, offset, isSelected, onSelect }: RowProps) {
+function RowImpl({
+  track,
+  index,
+  offset,
+  isSelected,
+  isCurrent,
+  isPlaying,
+  onSelect,
+  onActivate,
+}: RowProps) {
   return (
     <div
-      className={`row${isSelected ? " row--selected" : ""}`}
+      className={`row${isSelected ? " row--selected" : ""}${isCurrent ? " row--current" : ""}`}
       style={{ transform: `translateY(${offset}px)`, height: ROW_HEIGHT }}
       role="option"
       aria-selected={isSelected}
       onClick={() => onSelect(index)}
+      onDoubleClick={() => onActivate(index)}
       title={track.path}
     >
-      <span className="col col--num">{track.trackNo ?? ""}</span>
+      <span className="col col--num">
+        {isCurrent ? (isPlaying ? "▶" : "⏸") : (track.trackNo ?? "")}
+      </span>
       <span className="col col--title">{trackTitle(track)}</span>
       <span className="col col--dim">{trackArtist(track)}</span>
       <span className="col col--dim">{trackAlbum(track)}</span>

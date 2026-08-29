@@ -13,12 +13,14 @@
 pub mod backend;
 pub mod decode;
 pub mod device;
+pub mod engine;
 pub mod gain;
 pub mod ring;
 pub mod sine;
 
 pub use backend::CpalBackend;
 pub use decode::{DecodeError, SourceFormat, TrackDecoder};
+pub use engine::{Command, Engine, PlayerState, QueueItem, RepeatMode};
 pub use device::{
     AudioBackend, AudioError, DeviceId, DeviceInfo, OutputStream, Renderer, StreamInfo,
     StreamRequest,

@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { LibraryStatus, SyncOutcome, TrackRow } from "./types";
 import { TrackTable } from "./components/TrackTable";
+import { Transport } from "./components/Transport";
 import { formatBytes, formatTotalTime } from "./lib/format";
 
 /** Search returns the best matches, not every match; the list is ranked. */
@@ -18,6 +19,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
+  const [nowPlaying, setNowPlaying] = useState<{ id: number | null; playing: boolean }>({
+    id: null,
+    playing: false,
+  });
   const searchRef = useRef<HTMLInputElement>(null);
 
   // Search runs per keystroke. Responses can land out of order, so only the
@@ -111,6 +116,11 @@ export default function App() {
         searchRef.current?.select();
       }
       if (event.key === "Escape" && typingInField) searchRef.current?.blur();
+      // Space is the universal play/pause, except while typing into a field.
+      if (event.key === " " && !typingInField) {
+        event.preventDefault();
+        void invoke("toggle_play");
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -118,6 +128,26 @@ export default function App() {
 
   const stats = useMemo(() => summarise(tracks), [tracks]);
   const hasLibrary = root !== null;
+
+  // The transport names the playing track without another round trip.
+  const trackById = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
+
+  // Playing from a row queues everything currently listed, so a filtered view
+  // plays as the playlist it looks like.
+  const activate = useCallback(
+    (index: number) => {
+      const ids = tracks.map((track) => track.id);
+      if (ids.length === 0) return;
+      void invoke("play_tracks", { trackIds: ids, start: index }).catch((err) =>
+        setError(String(err)),
+      );
+    },
+    [tracks],
+  );
+
+  const onNowPlayingChange = useCallback((id: number | null, playing: boolean) => {
+    setNowPlaying({ id, playing });
+  }, []);
 
   return (
     <div className="app">
@@ -173,7 +203,14 @@ export default function App() {
         )}
 
         {hasLibrary && tracks.length > 0 && (
-          <TrackTable tracks={tracks} selected={selected} onSelect={setSelected} />
+          <TrackTable
+            tracks={tracks}
+            selected={selected}
+            onSelect={setSelected}
+            onActivate={activate}
+            playingId={nowPlaying.id}
+            isPlaying={nowPlaying.playing}
+          />
         )}
 
         {hasLibrary && tracks.length === 0 && (
@@ -184,6 +221,8 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {hasLibrary && <Transport trackById={trackById} onNowPlayingChange={onNowPlayingChange} />}
 
       {hasLibrary && (
         <footer className="statusbar">
