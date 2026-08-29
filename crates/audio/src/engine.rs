@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::CpalBackend;
 use crate::decode::TrackDecoder;
-use crate::device::{AudioBackend, AudioError, DeviceInfo, OutputStream, StreamRequest};
+use crate::device::{AudioBackend, AudioError, DeviceFormat, DeviceInfo, OutputStream, StreamRequest};
 use crate::ring::{self, Boundary, PlaybackShared};
 
 /// How long the decode thread will wait for the callback to acknowledge a seek
@@ -45,11 +45,57 @@ const COMPLETION_FRACTION: f64 = 0.5;
 /// while the interface stays connected -- so that half is polled.
 const DEVICE_CHECK_TICKS: u8 = 10;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How long a paused player keeps exclusive access before giving the device
+/// back. Long enough that pausing to answer the door does not cost a device
+/// switch, short enough that nobody is left wondering why YouTube is silent.
+const HOG_RELEASE_AFTER: Duration = Duration::from_secs(20);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueItem {
     pub track_id: i64,
     pub path: String,
+    /// Used by "follow album": the rate is only changed at album boundaries.
+    pub album_id: Option<i64>,
+    /// ReplayGain in dB, from tags or from the analysis pass.
+    pub replay_gain_db: Option<f32>,
+    /// Sample peak, so the gain can be held back rather than clip.
+    pub replay_gain_peak: Option<f32>,
+}
+
+/// How the output device's rate is chosen.
+///
+/// The three the design document lays out, and the trade between them is real:
+/// switching per track is the most faithful and breaks gapless across a rate
+/// boundary; a fixed rate resamples everything and never breaks gapless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "mode", content = "rate")]
+pub enum RateMode {
+    /// Switch the device to each track's rate. Best fidelity, small gap on a
+    /// rate change. The default when exclusive mode is on.
+    FollowFile,
+    /// One rate for everything, resampled to fit. Gapless always works.
+    Fixed(u32),
+    /// Switch only at album boundaries, since tracks in an album share a rate.
+    FollowAlbum,
+}
+
+impl Default for RateMode {
+    fn default() -> Self {
+        Self::FollowFile
+    }
+}
+
+/// Per-device output settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSettings {
+    /// Take the device exclusively. Per-device opt-in and never a default: an
+    /// interface deserves it, laptop speakers never do, and while it is held
+    /// every other application on the machine goes silent.
+    pub exclusive: bool,
+    pub rate_mode: RateMode,
+    pub replay_gain: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -75,6 +121,7 @@ pub enum Command {
     SetVolume(f32),
     SetRepeat(RepeatMode),
     SetShuffle(bool),
+    SetOutputSettings(OutputSettings),
     /// Move playback to the current default output device, rebuilding the ring
     /// and the stream but keeping the open file and its position.
     ///
@@ -95,6 +142,60 @@ pub struct PlayEvent {
     pub ms_played: u64,
     /// Crossed the halfway mark. Anything less counts as a skip.
     pub completed: bool,
+}
+
+/// One thing that could have altered the audio on its way out.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stage {
+    pub name: String,
+    /// False means grey in the panel. Three inactive lines is the point.
+    pub active: bool,
+    /// What it did, when it did something.
+    pub detail: Option<String>,
+}
+
+/// The full signal path: what the file is, what came out of the decoder, every
+/// stage that could have touched the samples, and what the hardware is running.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalPath {
+    pub source: SourceSnapshot,
+    /// What Symphonia produced. Always 32-bit float: that is what decoders emit.
+    pub decoder_sample_rate: u32,
+    pub decoder_format: String,
+    pub processing: Vec<Stage>,
+    pub device_name: Option<String>,
+    /// Read back from the hardware, not echoed from the request. `None` when it
+    /// could not be read, which is reported as unknown rather than assumed.
+    pub device_format: Option<DeviceFormatView>,
+    pub exclusive: bool,
+    /// Green only when nothing altered the audio and the device rate matches.
+    pub bit_perfect: bool,
+    /// How many processing stages fired, for the "altered, N stages" badge.
+    pub altered_stages: usize,
+    /// Why it is not bit-perfect, in one line.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceFormatView {
+    pub sample_rate: u32,
+    pub bits_per_channel: u32,
+    pub channels: u32,
+    pub sample_format: String,
+}
+
+impl From<&DeviceFormat> for DeviceFormatView {
+    fn from(format: &DeviceFormat) -> Self {
+        Self {
+            sample_rate: format.sample_rate,
+            bits_per_channel: format.bits_per_channel,
+            channels: format.channels,
+            sample_format: format.sample_format.clone(),
+        }
+    }
 }
 
 /// What the file is, straight from the stream. The basis of the phase 5 panel.
@@ -127,6 +228,10 @@ pub struct PlayerState {
     /// Non-zero means the decoder fell behind and the device ran dry.
     pub underruns: u64,
     pub error: Option<String>,
+    pub settings: OutputSettings,
+    pub signal: Option<SignalPath>,
+    /// Rates the current device will accept, for the settings UI.
+    pub device_rates: Vec<u32>,
 }
 
 impl Default for PlayerState {
@@ -146,6 +251,9 @@ impl Default for PlayerState {
             device_sample_rate: None,
             underruns: 0,
             error: None,
+            settings: OutputSettings::default(),
+            signal: None,
+            device_rates: Vec::new(),
         }
     }
 }
@@ -158,6 +266,10 @@ pub struct Engine {
     /// The rate the current stream runs at, for turning frames into milliseconds.
     sample_rate: Arc<AtomicU32>,
     plays: Arc<Mutex<Vec<PlayEvent>>>,
+    /// Joined on drop. Quitting must not race the control thread: it is the
+    /// thing that hands the device back, and a process that exits still holding
+    /// one leaves the machine silent for everything else.
+    control: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Engine {
@@ -170,7 +282,7 @@ impl Engine {
 
         // Built inside the thread, not moved into it: the output stream handle
         // is not Send on macOS, so whichever thread opens one must own it.
-        std::thread::Builder::new()
+        let control = std::thread::Builder::new()
             .name("dubplate-control".into())
             .spawn({
                 let shared = Arc::clone(&shared);
@@ -187,6 +299,7 @@ impl Engine {
             state,
             sample_rate,
             plays,
+            control: Some(control),
         }
     }
 
@@ -221,6 +334,12 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.send(Command::Shutdown);
+        // Wait for it. The control thread releases exclusive access and puts
+        // the device's rate back on the way out, and none of that happens if
+        // the process exits first.
+        if let Some(handle) = self.control.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -480,6 +599,20 @@ struct Control {
     shuffle: bool,
     volume: f32,
     rng: u64,
+    settings: OutputSettings,
+    /// The album the open stream's rate was chosen for, for "follow album".
+    stream_album: Option<i64>,
+    /// The device's rate before we ever opened a stream on it.
+    ///
+    /// Captured before, not during: opening a stream can move the nominal rate
+    /// by itself, so asking afterwards records our own change as the original.
+    original_rate: Option<(crate::device::DeviceId, u32)>,
+    /// ReplayGain of the track playing, so the gain can be recomputed when the
+    /// volume moves without reopening anything.
+    current_gain_db: Option<f32>,
+    current_peak: Option<f32>,
+    current_source: Option<SourceSnapshot>,
+    paused_since: Option<Instant>,
 
     plays: Arc<Mutex<Vec<PlayEvent>>>,
     progress: Option<PlayProgress>,
@@ -526,6 +659,13 @@ impl Control {
             repeat: RepeatMode::Off,
             shuffle: false,
             volume: 1.0,
+            settings: OutputSettings::default(),
+            stream_album: None,
+            original_rate: None,
+            current_gain_db: None,
+            current_peak: None,
+            current_source: None,
+            paused_since: None,
             rng: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
@@ -563,8 +703,11 @@ impl Control {
             }
             self.observe_boundary();
             self.check_output_device();
+            self.maybe_release_hog();
             self.publish();
         }
+        // Never exit still holding the device.
+        self.release_output();
         let _ = self.decode_tx.send(DecodeCommand::Shutdown);
     }
 
@@ -611,11 +754,22 @@ impl Control {
             Command::Seek { ms } => self.seek_ms(ms),
             Command::SetVolume(volume) => {
                 self.volume = volume.clamp(0.0, 1.0);
-                self.shared.set_target_gain(self.volume);
+                self.apply_gain();
             }
             Command::ReopenOutput => {
                 self.device = None;
                 self.check_output_device();
+            }
+            Command::SetOutputSettings(settings) => {
+                let reopen = settings.exclusive != self.settings.exclusive
+                    || settings.rate_mode != self.settings.rate_mode;
+                self.settings = settings;
+                self.apply_gain();
+                if reopen && self.stream.is_some() {
+                    // Exclusive access and the device rate are both decided when
+                    // the stream opens, so changing either means opening again.
+                    self.rebuild_output();
+                }
             }
             Command::SetRepeat(mode) => self.repeat = mode,
             Command::SetShuffle(on) => {
@@ -756,6 +910,12 @@ impl Control {
             }
             self.finish_play();
             self.cursor = track.cursor;
+            if let Some(item) = self.order.get(track.cursor).and_then(|i| self.queue.get(*i)) {
+                self.current_gain_db = item.replay_gain_db;
+                self.current_peak = item.replay_gain_peak;
+            }
+            self.current_source = Some(track.source.clone());
+            self.apply_gain();
             self.progress = Some(PlayProgress {
                 track_id: track.track_id,
                 furthest_ms: 0,
@@ -876,7 +1036,10 @@ impl Control {
 
         self.sample_rate
             .store(format.sample_rate, Ordering::Relaxed);
-        self.shared.set_target_gain(self.volume);
+        self.current_gain_db = item.replay_gain_db;
+        self.current_peak = item.replay_gain_peak;
+        self.apply_gain();
+        self.engage_output(format.sample_rate, item.album_id);
 
         let duration_ms = format
             .duration()
@@ -888,6 +1051,7 @@ impl Control {
             channels: format.channels,
             bits_per_sample: format.bits_per_sample,
         };
+        self.current_source = Some(source.clone());
 
         let _ = self.decode_tx.send(DecodeCommand::Play {
             decoder: Box::new(decoder),
@@ -937,6 +1101,15 @@ impl Control {
             }
         };
 
+        // Look at the device before anything of ours touches it.
+        if self.original_rate.as_ref().map(|(id, _)| id) != Some(&device.id) {
+            self.original_rate = self
+                .backend
+                .device_rate(&device.id)
+                .ok()
+                .map(|rate| (device.id.clone(), rate));
+        }
+
         let (producer, boundaries, renderer) =
             ring::open(sample_rate, channels, Arc::clone(&self.shared));
         let stream = self
@@ -958,7 +1131,7 @@ impl Control {
                     })
                 },
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{e} ({})", device.id.0))?;
 
         if let Ok(mut state) = self.state.lock() {
             state.device = Some(stream.info().device.name.clone());
@@ -992,10 +1165,12 @@ impl Control {
             return;
         }
 
-        let default = self.backend.default_device().ok();
-        let moved = match (&self.device, &default) {
-            (Some(current), Some(now)) => current.id != now.id,
-            (Some(_), None) => true,
+        // Ask for the id alone: full enumeration stops working while we hold
+        // the device exclusively, and a failure there would look identical to
+        // the device vanishing.
+        let default_id = self.backend.default_device_id().ok();
+        let moved = match (&self.device, &default_id) {
+            (Some(current), Some(now)) => current.id != *now,
             _ => false,
         };
 
@@ -1003,10 +1178,21 @@ impl Control {
         if !lost && !moved && !forced && !self.awaiting_device {
             return;
         }
-        let Some(default) = default else {
-            // Nothing to play through at all. Pause and say so, rather than
-            // pretending to play into a device that is not there.
-            if !self.awaiting_device {
+
+        if default_id.is_none() && !lost {
+            // Cannot tell what the default is. Doing nothing is strictly better
+            // than tearing down a stream that is playing perfectly well.
+            return;
+        }
+
+        let Some(default) = self.backend.default_device().ok().filter(|info| {
+            // A device we cannot address is not a device we can move to.
+            default_id
+                .as_ref()
+                .map(|id| info.id == *id)
+                .unwrap_or(false)
+        }) else {
+            if lost && self.stream.is_some() {
                 self.shared.set_playing(false);
                 self.awaiting_device = true;
                 self.set_error(Some("No output device available".into()));
@@ -1038,6 +1224,11 @@ impl Control {
 
         match self.open_stream(rate, channels) {
             Ok(sinks) => {
+                // A rebuilt stream is a new stream: it has to be taken and put
+                // at the right rate again, exactly like a freshly opened one.
+                // Forgetting this is how "exclusive" silently stays shared.
+                let album = self.stream_album;
+                self.engage_output(rate, album);
                 let _ = self.decode_tx.send(DecodeCommand::Rebind {
                     sinks,
                     frames,
@@ -1062,11 +1253,95 @@ impl Control {
         }
     }
 
+    /// Volume multiplied by ReplayGain, held back so it cannot clip.
+    ///
+    /// Several real files already peak above full scale, so a positive gain
+    /// applied blindly would clip at the DAC. The peak is what stops that.
+    fn apply_gain(&self) {
+        let mut gain = self.volume;
+        if self.settings.replay_gain {
+            if let Some(db) = self.current_gain_db {
+                let linear = 10f32.powf(db / 20.0);
+                let limited = match self.current_peak {
+                    Some(peak) if peak > 0.0 => linear.min(1.0 / peak),
+                    _ => linear,
+                };
+                gain *= limited;
+            }
+        }
+        self.shared.set_target_gain(gain);
+    }
+
+    /// True when ReplayGain is actually changing the audio right now.
+    fn replay_gain_active(&self) -> bool {
+        self.settings.replay_gain
+            && self.current_gain_db.map(|db| db.abs() > 0.01).unwrap_or(false)
+    }
+
+    /// What the device should be running at for this track.
+    fn desired_device_rate(&self, file_rate: u32, album_id: Option<i64>) -> Option<u32> {
+        match self.settings.rate_mode {
+            RateMode::FollowFile => Some(file_rate),
+            RateMode::Fixed(rate) => Some(rate),
+            // Tracks in an album share a rate, so switching only when the album
+            // changes gets almost all of the fidelity without a gap per track.
+            RateMode::FollowAlbum => {
+                if album_id.is_some() && album_id == self.stream_album {
+                    None
+                } else {
+                    Some(file_rate)
+                }
+            }
+        }
+    }
+
+    /// Take the device and put it at the right rate, in that order: the rate
+    /// only sticks once nothing else can move it.
+    fn engage_output(&mut self, file_rate: u32, album_id: Option<i64>) {
+        let exclusive = self.settings.exclusive;
+        let desired = self.desired_device_rate(file_rate, album_id);
+
+        if let Some(stream) = self.stream.as_mut() {
+            if exclusive {
+                if let Err(err) = stream.set_exclusive(true) {
+                    // Another application already owns it, or the device does
+                    // not allow it. Shared mode still plays.
+                    tracing::warn!(%err, "could not take exclusive access");
+                }
+            }
+            if let Some(rate) = desired {
+                if let Err(err) = stream.set_rate(rate) {
+                    tracing::debug!(%err, "device kept its own rate");
+                }
+            }
+        }
+        self.stream_album = album_id;
+    }
+
+    /// Give the device back, and leave it as we found it.
+    ///
+    /// Restoring the rate matters: a system-wide setting changed and abandoned
+    /// means the next application inherits whatever the last track wanted.
+    fn release_output(&mut self) {
+        if let Some(stream) = self.stream.as_mut() {
+            let _ = stream.set_exclusive(false);
+        }
+        if let Some((id, rate)) = self.original_rate.clone() {
+            let _ = self.backend.set_device_rate(&id, rate);
+        }
+    }
+
     fn resume(&mut self) {
         if let Some(stream) = self.stream.as_mut() {
             let _ = stream.play();
         }
-        self.shared.set_target_gain(self.volume);
+        self.paused_since = None;
+        if self.settings.exclusive {
+            if let Some(stream) = self.stream.as_mut() {
+                let _ = stream.set_exclusive(true);
+            }
+        }
+        self.apply_gain();
         self.shared.set_playing(true);
     }
 
@@ -1074,6 +1349,21 @@ impl Control {
         // Leave the stream running so the gain ramp can fade out rather than
         // cutting; the callback stops pulling once it reaches silence.
         self.shared.set_playing(false);
+        self.paused_since = Some(Instant::now());
+    }
+
+    /// Hand the device back if we have been paused a while holding it.
+    fn maybe_release_hog(&mut self) {
+        if !self.settings.exclusive || self.shared.is_playing() {
+            return;
+        }
+        let Some(since) = self.paused_since else {
+            return;
+        };
+        if since.elapsed() >= HOG_RELEASE_AFTER {
+            self.paused_since = None;
+            self.release_output();
+        }
     }
 
     fn seek_ms(&mut self, ms: u64) {
@@ -1104,6 +1394,87 @@ impl Control {
         }
     }
 
+    /// Assemble the signal path: what the file is, everything that could have
+    /// touched it, and what the hardware is actually doing.
+    fn signal_path(&self) -> Option<SignalPath> {
+        let source = self.current_source.clone()?;
+        let stream = self.stream.as_ref();
+        let physical = stream.and_then(|s| s.info().physical.as_ref());
+
+        // Something resampled if the hardware is not running at the file's rate.
+        // Whether it was us or CoreAudio, the audio was altered.
+        let device_rate = physical.map(|format| format.sample_rate);
+        let resampled = device_rate.map(|rate| rate != source.sample_rate).unwrap_or(false);
+
+        let volume_active = (self.volume - 1.0).abs() > 0.001;
+        let replay_gain = self.replay_gain_active();
+
+        let processing = vec![
+            Stage {
+                name: "Resampling".into(),
+                active: resampled,
+                detail: resampled.then(|| {
+                    format!(
+                        "{} Hz to {} Hz",
+                        source.sample_rate,
+                        device_rate.unwrap_or(0)
+                    )
+                }),
+            },
+            Stage {
+                name: "Volume".into(),
+                active: volume_active,
+                detail: volume_active.then(|| format!("{:.0}%", self.volume * 100.0)),
+            },
+            Stage {
+                name: "ReplayGain".into(),
+                active: replay_gain,
+                detail: replay_gain
+                    .then(|| self.current_gain_db.map(|db| format!("{db:+.2} dB")))
+                    .flatten(),
+            },
+            // Crossfade shares most of gapless's machinery and lands after it.
+            Stage {
+                name: "Crossfade".into(),
+                active: false,
+                detail: None,
+            },
+        ];
+
+        let altered_stages = processing.iter().filter(|stage| stage.active).count();
+        let exclusive = stream.map(|s| s.info().exclusive).unwrap_or(false);
+
+        // Green only when nothing fired and the hardware really is at the
+        // file's rate. An unreadable device format is not a pass.
+        let bit_perfect = altered_stages == 0 && device_rate == Some(source.sample_rate);
+        let reason = if bit_perfect {
+            None
+        } else if device_rate.is_none() {
+            Some("The device would not report its format".into())
+        } else if altered_stages > 0 {
+            Some(format!(
+                "{} of 4 stages altered the audio",
+                altered_stages
+            ))
+        } else {
+            Some("The device is not running at the file's rate".into())
+        };
+
+        Some(SignalPath {
+            source,
+            // Decoders emit 32-bit float. That is not a choice we make.
+            decoder_sample_rate: self.sample_rate.load(Ordering::Relaxed),
+            decoder_format: "f32".into(),
+            processing,
+            device_name: stream.map(|s| s.info().device.name.clone()),
+            device_format: physical.map(DeviceFormatView::from),
+            exclusive,
+            bit_perfect,
+            altered_stages,
+            reason,
+        })
+    }
+
     fn publish(&mut self) {
         // Furthest point reached, not wall clock: seeking back and forth must
         // not inflate how much of a track counts as heard.
@@ -1121,6 +1492,18 @@ impl Control {
             state.repeat = self.repeat;
             state.shuffle = self.shuffle;
             state.underruns = self.shared.underruns();
+            state.settings = self.settings.clone();
+            state.device_rates = self
+                .device
+                .as_ref()
+                .map(|device| device.sample_rates.clone())
+                .unwrap_or_default();
+        }
+        // Built outside the lock: it reads the stream, which the lock does not
+        // protect anyway.
+        let signal = self.signal_path();
+        if let Ok(mut state) = self.state.lock() {
+            state.signal = signal;
         }
     }
 }
@@ -1134,5 +1517,6 @@ pub fn queue_item(track_id: i64, path: impl Into<PathBuf>) -> QueueItem {
     QueueItem {
         track_id,
         path: path.into().to_string_lossy().into_owned(),
+        ..Default::default()
     }
 }

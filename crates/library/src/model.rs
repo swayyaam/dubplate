@@ -30,6 +30,10 @@ pub struct TrackRow {
     pub bitrate: Option<u32>,
 
     /// Key into the artwork cache, or null if this album has no art yet.
+    /// ReplayGain in dB, from the file's tags or the analysis pass.
+    pub replay_gain_db: Option<f32>,
+    pub replay_gain_peak: Option<f32>,
+
     pub art_hash: Option<String>,
     pub play_count: i64,
     pub loved: bool,
@@ -43,6 +47,7 @@ pub(crate) const TRACK_COLUMNS: &str = "
     t.id, t.path, t.size, t.title, ar.name, al.title, aa.name,
     t.track_no, t.disc_no, t.year, t.genre,
     t.duration_ms, t.codec, t.is_lossy, t.sample_rate, t.bit_depth, t.channels, t.bitrate,
+    t.rg_track_gain, t.rg_track_peak,
     al.art_hash, t.play_count, t.loved, t.added_at, t.last_played
 ";
 
@@ -86,11 +91,13 @@ impl TrackRow {
             bit_depth: row.get(15)?,
             channels: row.get(16)?,
             bitrate: row.get(17)?,
-            art_hash: row.get(18)?,
-            play_count: row.get(19)?,
-            loved: row.get::<_, i64>(20)? != 0,
-            added_at: row.get(21)?,
-            last_played: row.get(22)?,
+            replay_gain_db: row.get(18)?,
+            replay_gain_peak: row.get(19)?,
+            art_hash: row.get(20)?,
+            play_count: row.get(21)?,
+            loved: row.get::<_, i64>(22)? != 0,
+            added_at: row.get(23)?,
+            last_played: row.get(24)?,
         })
     }
 }

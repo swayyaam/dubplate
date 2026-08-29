@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use dubplate_audio::engine::{queue_item, Command, Engine};
+use dubplate_audio::engine::{queue_item, Command, Engine, OutputSettings, RateMode, SignalPath};
 
 fn main() -> anyhow::Result<()> {
     let paths: Vec<String> = std::env::args().skip(1).collect();
@@ -18,7 +18,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     let gapless = paths.iter().any(|p| p == "--gapless");
-    let paths: Vec<String> = paths.into_iter().filter(|p| p != "--gapless").collect();
+    let exclusive = paths.iter().any(|p| p == "--exclusive");
+    let paths: Vec<String> = paths
+        .into_iter()
+        .filter(|p| p != "--gapless" && p != "--exclusive")
+        .collect();
 
     let engine = Engine::spawn();
     let items = paths
@@ -28,7 +32,17 @@ fn main() -> anyhow::Result<()> {
         .collect();
 
     engine.send(Command::SetQueue { items, start: 0 });
-    engine.send(Command::SetVolume(0.35));
+    engine.send(Command::SetVolume(if exclusive { 1.0 } else { 0.35 }));
+    if exclusive {
+        // Exclusive plus follow-file is the combination the design document
+        // calls the best-fidelity path: the device runs at the file's rate and
+        // nothing else on the machine can move it.
+        engine.send(Command::SetOutputSettings(OutputSettings {
+            exclusive: true,
+            rate_mode: RateMode::FollowFile,
+            replay_gain: true,
+        }));
+    }
 
     settle(&engine);
     let state = engine.snapshot();
@@ -45,7 +59,20 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "—".into())
         );
     }
-    println!("duration    {:.1}s\n", state.duration_ms as f64 / 1000.0);
+    println!("duration    {:.1}s", state.duration_ms as f64 / 1000.0);
+    // Let the device settle after any rate change before reading it back.
+    std::thread::sleep(Duration::from_millis(600));
+    let snap = engine.snapshot();
+    if let Some(err) = &snap.error {
+        println!("error       {err}");
+    }
+    println!(
+        "settings    exclusive={} rate_mode={:?}",
+        snap.settings.exclusive, snap.settings.rate_mode
+    );
+    if let Some(signal) = snap.signal {
+        print_signal(&signal);
+    }
 
     if gapless {
         return watch_gapless(&engine);
@@ -201,4 +228,57 @@ fn watch_gapless(engine: &Engine) -> anyhow::Result<()> {
     engine.send(Command::Stop);
     std::thread::sleep(Duration::from_millis(100));
     Ok(())
+}
+
+/// The four blocks the design document specifies, and the verdict.
+fn print_signal(signal: &SignalPath) {
+    println!("\n── signal path ──");
+    println!(
+        "  SOURCE      {} · {} Hz · {} · {} ch",
+        signal.source.codec.to_uppercase(),
+        signal.source.sample_rate,
+        signal
+            .source
+            .bits_per_sample
+            .map(|b| format!("{b} bit"))
+            // Not a missing value: lossy codecs have no bit depth at all.
+            .unwrap_or_else(|| "no bit depth (lossy)".into()),
+        signal.source.channels,
+    );
+    println!(
+        "  DECODER     {} Hz · {}",
+        signal.decoder_sample_rate, signal.decoder_format
+    );
+    println!("  PROCESSING");
+    for stage in &signal.processing {
+        match (&stage.active, &stage.detail) {
+            (true, Some(detail)) => println!("    {:<12} {}", stage.name, detail),
+            (true, None) => println!("    {:<12} active", stage.name),
+            (false, _) => println!("    {:<12} —", stage.name),
+        }
+    }
+    match &signal.device_format {
+        Some(format) => println!(
+            "  OUTPUT      {} · {} Hz · {} · {} ch · {}",
+            signal.device_name.as_deref().unwrap_or("—"),
+            format.sample_rate,
+            format.sample_format,
+            format.channels,
+            if signal.exclusive { "exclusive" } else { "shared" },
+        ),
+        None => println!(
+            "  OUTPUT      {} · format unknown",
+            signal.device_name.as_deref().unwrap_or("—")
+        ),
+    }
+    if signal.bit_perfect {
+        println!("\n  VERDICT     bit-perfect");
+    } else {
+        println!(
+            "\n  VERDICT     altered, {} stage{} — {}",
+            signal.altered_stages,
+            if signal.altered_stages == 1 { "" } else { "s" },
+            signal.reason.as_deref().unwrap_or("")
+        );
+    }
 }

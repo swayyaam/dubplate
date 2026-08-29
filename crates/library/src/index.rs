@@ -234,8 +234,9 @@ fn insert_track(tx: &Transaction, fields: &TrackFields, now: i64) -> Result<()> 
             path, content_key, mtime, size,
             title, artist_id, album_id, track_no, disc_no, year, genre,
             duration_ms, codec, is_lossy, sample_rate, bit_depth, channels, bitrate,
+            rg_track_gain, rg_track_peak,
             added_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             t.path,
             fields.content_key,
@@ -255,6 +256,8 @@ fn insert_track(tx: &Transaction, fields: &TrackFields, now: i64) -> Result<()> 
             t.bit_depth,
             t.channels,
             t.bitrate,
+            t.replay_gain_db,
+            t.replay_gain_peak,
             now,
         ],
     )?;
@@ -273,8 +276,12 @@ fn update_track(
             path = ?1, content_key = ?2, mtime = ?3, size = ?4,
             title = ?5, artist_id = ?6, album_id = ?7, track_no = ?8, disc_no = ?9,
             year = ?10, genre = ?11, duration_ms = ?12, codec = ?13, is_lossy = ?14,
-            sample_rate = ?15, bit_depth = ?16, channels = ?17, bitrate = ?18
-         WHERE id = ?19",
+            sample_rate = ?15, bit_depth = ?16, channels = ?17, bitrate = ?18,
+            -- Keep a value the analysis pass computed when the file carries no
+            -- tag of its own, but let a real tag win.
+            rg_track_gain = COALESCE(?19, rg_track_gain),
+            rg_track_peak = COALESCE(?20, rg_track_peak)
+         WHERE id = ?21",
         params![
             t.path,
             fields.content_key,
@@ -294,19 +301,23 @@ fn update_track(
             t.bit_depth,
             t.channels,
             t.bitrate,
+            t.replay_gain_db,
+            t.replay_gain_peak,
             id,
         ],
     )?;
 
     if reset_analysis {
         // Loudness, BPM, key and spectral figures describe bytes that are gone.
+        // The stored analysis described bytes that are gone. ReplayGain comes
+        // back from the file's own tags, if it has any, rather than being lost.
         tx.execute(
             "UPDATE tracks SET
-                analyzed_at = NULL, rg_track_gain = NULL, rg_track_peak = NULL,
-                bpm = NULL, music_key = NULL, effective_bits = NULL,
-                spectral_cutoff = NULL, transcode_score = NULL
+                analyzed_at = NULL, bpm = NULL, music_key = NULL,
+                effective_bits = NULL, spectral_cutoff = NULL, transcode_score = NULL,
+                rg_track_gain = ?2, rg_track_peak = ?3
              WHERE id = ?1",
-            params![id],
+            params![id, fields.track.replay_gain_db, fields.track.replay_gain_peak],
         )?;
     }
     Ok(())

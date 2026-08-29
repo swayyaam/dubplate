@@ -11,6 +11,8 @@
 //! itself, never a `Mutex`.
 
 pub mod backend;
+#[cfg(target_os = "macos")]
+pub mod coreaudio;
 pub mod decode;
 pub mod device;
 pub mod engine;
@@ -21,10 +23,12 @@ pub mod sine;
 
 pub use backend::CpalBackend;
 pub use decode::{DecodeError, SourceFormat, TrackDecoder};
-pub use engine::{Command, Engine, PlayerState, QueueItem, RepeatMode};
+pub use engine::{
+    Command, Engine, OutputSettings, PlayerState, QueueItem, RateMode, RepeatMode, SignalPath,
+};
 pub use device::{
-    AudioBackend, AudioError, DeviceId, DeviceInfo, OutputStream, Renderer, StreamInfo,
-    StreamRequest,
+    AudioBackend, AudioError, DeviceFormat, DeviceId, DeviceInfo, OutputStream, Renderer,
+    StreamInfo, StreamRequest,
 };
 pub use gain::GainRamp;
 pub use ring::{ring_capacity_frames, Boundary, PlaybackShared, RingRenderer};

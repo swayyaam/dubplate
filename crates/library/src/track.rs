@@ -49,6 +49,14 @@ pub struct ScannedTrack {
     pub bit_depth: Option<u8>,
     pub channels: Option<u8>,
     pub bitrate: Option<u32>,
+
+    /// ReplayGain as the file already carries it, in dB. Falls back to the
+    /// album value when the track has none, which is what a player wants for a
+    /// mix that was analysed as a whole.
+    pub replay_gain_db: Option<f32>,
+    /// Sample peak, 1.0 being full scale. Used to hold the gain back rather than
+    /// clip: several real files already peak above full scale.
+    pub replay_gain_peak: Option<f32>,
 }
 
 impl ScannedTrack {

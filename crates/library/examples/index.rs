@@ -42,6 +42,34 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    {
+        let conn = library.connection();
+        let (with_gain, with_peak): (i64, i64) = conn
+            .query_row(
+                "SELECT SUM(rg_track_gain IS NOT NULL), SUM(rg_track_peak IS NOT NULL) FROM tracks",
+                [],
+                |row| Ok((row.get(0).unwrap_or(0), row.get(1).unwrap_or(0))),
+            )
+            .unwrap_or((0, 0));
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM tracks", [], |row| row.get(0))
+            .unwrap_or(0);
+        println!("\n== replaygain (from tags) ==");
+        println!("tracks with gain  {with_gain} of {total}");
+        println!("tracks with peak  {with_peak} of {total}");
+        if with_gain > 0 {
+            let (min, max, avg): (f64, f64, f64) = conn
+                .query_row(
+                    "SELECT MIN(rg_track_gain), MAX(rg_track_gain), AVG(rg_track_gain)
+                     FROM tracks WHERE rg_track_gain IS NOT NULL",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap_or((0.0, 0.0, 0.0));
+            println!("gain range        {min:.2} to {max:.2} dB, mean {avg:.2} dB");
+        }
+    }
+
     println!("\n== queries ==");
     let started = Instant::now();
     let all = query::list_tracks(&library)?;

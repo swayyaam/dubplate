@@ -56,6 +56,16 @@ pub struct StreamRequest {
     pub buffer_frames: Option<u32>,
 }
 
+/// A format as the hardware reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceFormat {
+    pub sample_rate: u32,
+    pub bits_per_channel: u32,
+    pub channels: u32,
+    /// s16, s24, s32, f32 -- the distinction WAV needs and most players lose.
+    pub sample_format: String,
+}
+
 /// What the device is actually running, read back from the device rather than
 /// echoed from the request.
 ///
@@ -69,6 +79,11 @@ pub struct StreamInfo {
     pub channels: u16,
     pub buffer_frames: Option<u32>,
     pub exclusive: bool,
+    /// What the hardware says it is running, not what we asked for.
+    ///
+    /// `None` when it could not be read, which the signal path must report as
+    /// "unknown" rather than quietly falling back to the request.
+    pub physical: Option<DeviceFormat>,
 }
 
 /// Fills device buffers. Called on the realtime audio thread.
@@ -117,6 +132,15 @@ pub trait AudioBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn enumerate(&self) -> Result<Vec<DeviceInfo>>;
     fn default_device(&self) -> Result<DeviceInfo>;
+
+    /// Just the current default device's id, cheaply and reliably.
+    ///
+    /// Separate from `default_device` because that one enumerates, and
+    /// enumeration is exactly what stops working once a device is held
+    /// exclusively. Change detection must keep working while we hold it.
+    fn default_device_id(&self) -> Result<DeviceId> {
+        self.default_device().map(|device| device.id)
+    }
     fn open(
         &self,
         device: &DeviceId,
@@ -124,4 +148,16 @@ pub trait AudioBackend: Send + Sync {
         renderer: Box<dyn Renderer>,
         on_error: ErrorSink,
     ) -> Result<Box<dyn OutputStream>>;
+
+    /// The device's nominal rate, readable without opening a stream.
+    ///
+    /// Needed because opening a stream can itself move the rate, so anything
+    /// hoping to put the device back as it found it has to look first.
+    fn device_rate(&self, _device: &DeviceId) -> Result<u32> {
+        Err(AudioError::Unsupported("reading the device sample rate"))
+    }
+
+    fn set_device_rate(&self, _device: &DeviceId, _rate: u32) -> Result<()> {
+        Err(AudioError::Unsupported("setting the device sample rate"))
+    }
 }

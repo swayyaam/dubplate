@@ -227,6 +227,16 @@ pub(crate) fn read_track(path: &Path, size: u64, mtime: i64) -> Result<ScannedTr
         sample_rate: properties.sample_rate().filter(|r| *r > 0),
         bit_depth,
         channels: properties.channels().filter(|c| *c > 0),
+        // Metadata by definition, so tags are the right source here -- unlike
+        // format, where they are not to be trusted.
+        replay_gain_db: tag.and_then(|t| {
+            decibels(t.get_string(ItemKey::ReplayGainTrackGain))
+                .or_else(|| decibels(t.get_string(ItemKey::ReplayGainAlbumGain)))
+        }),
+        replay_gain_peak: tag.and_then(|t| {
+            number(t.get_string(ItemKey::ReplayGainTrackPeak))
+                .or_else(|| number(t.get_string(ItemKey::ReplayGainAlbumPeak)))
+        }),
         bitrate: properties
             .audio_bitrate()
             .or_else(|| properties.overall_bitrate())
@@ -261,6 +271,26 @@ fn probe(path: &Path) -> Result<TaggedFile, String> {
     };
 
     attempt(ParsingMode::BestAttempt).or_else(|first| attempt(ParsingMode::Relaxed).map_err(|_| first))
+}
+
+/// "-7.50 dB", "-7.5", "+2.3 dB" -- writers disagree about the suffix and the
+/// sign, so parse leniently rather than dropping a perfectly good value.
+fn decibels(value: Option<&str>) -> Option<f32> {
+    let text = value?.trim();
+    let text = text
+        .strip_suffix("dB")
+        .or_else(|| text.strip_suffix("db"))
+        .or_else(|| text.strip_suffix("DB"))
+        .unwrap_or(text)
+        .trim();
+    let parsed: f32 = text.trim_start_matches('+').parse().ok()?;
+    // A gain outside this range is a broken tag, not a quiet record.
+    (-60.0..=30.0).contains(&parsed).then_some(parsed)
+}
+
+fn number(value: Option<&str>) -> Option<f32> {
+    let parsed: f32 = value?.trim().parse().ok()?;
+    (parsed.is_finite() && parsed > 0.0).then_some(parsed)
 }
 
 fn album_artist(tag: &Tag) -> Option<String> {
