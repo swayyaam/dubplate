@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -7,8 +8,10 @@ use dubplate_audio::engine::{
 };
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
+use dubplate_analysis::{pipeline, PeaksCache};
 use dubplate_library::{
-    history, index, query, watch, AlbumRow, Library, LibraryWatcher, Listen, SyncReport, TrackRow,
+    health, history, index, query, watch, AlbumRow, CollectionHealth, Library, LibraryWatcher,
+    Listen, SyncReport, TrackRow,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -26,6 +29,13 @@ const OUTPUT_KEY: &str = "output_settings";
 /// Buckets in a waveform. Enough detail for a full-width seek bar, small enough
 /// to send over IPC without thinking about it.
 const WAVEFORM_BUCKETS: usize = 1000;
+/// Tracks per analysis batch. Small enough that stopping is responsive, large
+/// enough that the thread pool is worth building.
+const ANALYSIS_BATCH: usize = 16;
+/// Threads while music is playing. The audio callback matters more than
+/// finishing sooner, and this leaves the machine usable besides.
+const ANALYSIS_THREADS_PLAYING: usize = 2;
+const ANALYSIS_THREADS_IDLE: usize = 6;
 /// How often playback state is written back. Often enough that a crash loses
 /// seconds, rarely enough that it is not writing during every frame.
 const SAVE_INTERVAL: Duration = Duration::from_secs(3);
@@ -36,8 +46,11 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 struct AppState {
     library: Mutex<Library>,
     artwork: ArtworkCache,
+    peaks: PeaksCache,
     watcher: Mutex<Option<LibraryWatcher>>,
     engine: Engine,
+    /// Guards against two analysis passes running at once.
+    analysing: AtomicBool,
 }
 
 /// The slice of playback worth surviving a restart.
@@ -276,22 +289,151 @@ async fn accent_color(state: State<'_, Arc<AppState>>, hash: String) -> Fallible
     .map_err(to_error)?
 }
 
-/// Peaks for the seek bar. One decode pass, roughly a tenth of a second.
+/// Peaks for the seek bar.
+///
+/// From the analysis cache when the track has been analysed, which is free.
+/// Otherwise decoded on demand, which costs about a tenth of a second.
 #[tauri::command]
 async fn waveform(state: State<'_, Arc<AppState>>, track_id: i64) -> Fallible<Vec<f32>> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let path: String = {
+        let (path, content_key): (String, String) = {
             let library = state.library.lock().map_err(to_error)?;
             library
                 .connection()
-                .query_row("SELECT path FROM tracks WHERE id = ?1", [track_id], |row| {
-                    row.get(0)
-                })
+                .query_row(
+                    "SELECT path, content_key FROM tracks WHERE id = ?1",
+                    [track_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
                 .map_err(to_error)?
         };
+        if let Some(cached) = state.peaks.read(&content_key) {
+            return Ok(cached);
+        }
         dubplate_audio::peaks::compute(std::path::Path::new(&path), WAVEFORM_BUCKETS)
             .map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisStatus {
+    remaining: i64,
+    total: i64,
+    running: bool,
+}
+
+#[tauri::command]
+fn analysis_status(state: State<'_, Arc<AppState>>) -> Fallible<AnalysisStatus> {
+    let library = state.library.lock().map_err(to_error)?;
+    let total = library
+        .connection()
+        .query_row("SELECT count(*) FROM tracks", [], |row| row.get(0))
+        .map_err(to_error)?;
+    Ok(AnalysisStatus {
+        remaining: pipeline::remaining(&library).map_err(to_error)?,
+        total,
+        running: state.analysing.load(Ordering::Relaxed),
+    })
+}
+
+/// Start the background analysis pass.
+///
+/// Resumable, so calling it again after a restart picks up where it stopped,
+/// and throttled, so it does not cost the thing it exists to improve.
+#[tauri::command]
+fn start_analysis(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    if state.analysing.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let state = Arc::clone(&state);
+    std::thread::Builder::new()
+        .name("dubplate-analysis".into())
+        .spawn(move || {
+            run_analysis(&app, &state);
+            state.analysing.store(false, Ordering::Release);
+            let _ = app.emit("analysis:done", ());
+        })
+        .ok();
+}
+
+fn run_analysis(app: &AppHandle, state: &Arc<AppState>) {
+    loop {
+        let playing = state.engine.snapshot().playing;
+        let threads = if playing {
+            ANALYSIS_THREADS_PLAYING
+        } else {
+            ANALYSIS_THREADS_IDLE
+        };
+
+        let pending = {
+            let Ok(library) = state.library.lock() else {
+                return;
+            };
+            match pipeline::take_pending(&library, ANALYSIS_BATCH) {
+                Ok(pending) => pending,
+                Err(_) => return,
+            }
+        };
+        if pending.is_empty() {
+            return;
+        }
+
+        // The expensive part, with no lock held: the rest of the app keeps
+        // querying while this runs.
+        let underruns_before = state.engine.snapshot().underruns;
+        let results = pipeline::analyse_all(&pending, threads);
+
+        let report = {
+            let Ok(mut library) = state.library.lock() else {
+                return;
+            };
+            match pipeline::store_all(&mut library, &state.peaks, &results) {
+                Ok(report) => report,
+                Err(_) => return,
+            }
+        };
+        let _ = app.emit("analysis:progress", &report);
+        if report.remaining == 0 {
+            return;
+        }
+
+        // Back off hard if the last batch cost the listener a dropout. The
+        // design document is explicit: analysis pauses rather than glitching
+        // playback.
+        if state.engine.snapshot().underruns > underruns_before {
+            std::thread::sleep(Duration::from_secs(5));
+        } else if playing {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+#[tauri::command]
+async fn collection_health(state: State<'_, Arc<AppState>>) -> Fallible<CollectionHealth> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        health::summary(&library).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// The tracks behind one number in the health view.
+#[tauri::command]
+async fn health_tracks(
+    state: State<'_, Arc<AppState>>,
+    filter: String,
+    limit: usize,
+) -> Fallible<Vec<TrackRow>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        health::tracks(&library, &filter, limit).map_err(to_error)
     })
     .await
     .map_err(to_error)?
@@ -573,8 +715,10 @@ pub fn run() {
             let state = Arc::new(AppState {
                 library: Mutex::new(library),
                 artwork,
+                peaks: PeaksCache::new(data_dir.join("waveforms")),
                 watcher: Mutex::new(None),
                 engine: Engine::spawn(),
+                analysing: AtomicBool::new(false),
             });
 
             // Resume watching the folder from the last session, so changes made
@@ -702,7 +846,11 @@ pub fn run() {
             get_ui_state,
             set_ui_state,
             set_output_settings,
-            reopen_output
+            reopen_output,
+            analysis_status,
+            start_analysis,
+            collection_health,
+            health_tracks
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

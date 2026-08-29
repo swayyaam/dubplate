@@ -8,6 +8,7 @@
 
 pub mod artwork;
 pub mod db;
+pub mod health;
 pub mod history;
 pub mod index;
 pub mod model;
@@ -18,6 +19,7 @@ pub mod watch;
 
 pub use artwork::{ArtworkCache, ArtworkReport};
 pub use db::Library;
+pub use health::{CollectionHealth, SUSPECT_THRESHOLD};
 pub use history::Listen;
 pub use index::{sync, SyncReport};
 pub use model::{AlbumRow, TrackRow};

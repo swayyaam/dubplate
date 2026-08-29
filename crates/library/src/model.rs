@@ -34,6 +34,19 @@ pub struct TrackRow {
     pub replay_gain_db: Option<f32>,
     pub replay_gain_peak: Option<f32>,
 
+    /// Bits the audio actually uses. Below the declared depth means the file is
+    /// a smaller recording padded into a bigger container.
+    pub effective_bits: Option<u32>,
+    /// Highest frequency carrying real energy, in Hz.
+    pub spectral_cutoff: Option<u32>,
+    /// 0 to 1. A suspicion that a lossless container holds lossy audio, never a
+    /// verdict, and never acted on automatically.
+    pub transcode_score: Option<f32>,
+    pub bpm: Option<f32>,
+    /// Camelot notation, e.g. "8A".
+    pub music_key: Option<String>,
+    pub analyzed_at: Option<i64>,
+
     pub art_hash: Option<String>,
     pub play_count: i64,
     pub loved: bool,
@@ -48,6 +61,7 @@ pub(crate) const TRACK_COLUMNS: &str = "
     t.track_no, t.disc_no, t.year, t.genre,
     t.duration_ms, t.codec, t.is_lossy, t.sample_rate, t.bit_depth, t.channels, t.bitrate,
     t.rg_track_gain, t.rg_track_peak,
+    t.effective_bits, t.spectral_cutoff, t.transcode_score, t.bpm, t.music_key, t.analyzed_at,
     al.art_hash, t.play_count, t.loved, t.added_at, t.last_played
 ";
 
@@ -93,11 +107,17 @@ impl TrackRow {
             bitrate: row.get(17)?,
             replay_gain_db: row.get(18)?,
             replay_gain_peak: row.get(19)?,
-            art_hash: row.get(20)?,
-            play_count: row.get(21)?,
-            loved: row.get::<_, i64>(22)? != 0,
-            added_at: row.get(23)?,
-            last_played: row.get(24)?,
+            effective_bits: row.get(20)?,
+            spectral_cutoff: row.get(21)?,
+            transcode_score: row.get(22)?,
+            bpm: row.get(23)?,
+            music_key: row.get(24)?,
+            analyzed_at: row.get(25)?,
+            art_hash: row.get(26)?,
+            play_count: row.get(27)?,
+            loved: row.get::<_, i64>(28)? != 0,
+            added_at: row.get(29)?,
+            last_played: row.get(30)?,
         })
     }
 }

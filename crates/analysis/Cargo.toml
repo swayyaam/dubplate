@@ -1,0 +1,21 @@
+[package]
+name        = "dubplate-analysis"
+description = "Offline audio analysis: loudness, peaks, tempo, key, and format verification"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+dubplate-audio   = { path = "../audio" }
+dubplate-library = { path = "../library" }
+anyhow.workspace = true
+serde.workspace  = true
+tracing.workspace = true
+ebur128 = "0.1.10"
+rustfft = "6.4.1"
+rayon = "1.12.0"
+rusqlite = "0.40.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
