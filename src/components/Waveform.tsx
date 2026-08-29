@@ -21,8 +21,14 @@ interface Props {
  */
 const DISPLAY_FLOOR_DB = 48;
 
-/** How much of its colour the not-yet-played part of the bar keeps. */
-const AHEAD_DIM = 0.45;
+/**
+ * How strongly the not-yet-played part of the bar is drawn.
+ *
+ * Faded rather than darkened. Scaling the colour towards black turns a pale
+ * gold into olive, so the part of the track you have not reached ends up a
+ * different hue from the part you have.
+ */
+const AHEAD_FADE = 0.46;
 
 /**
  * The seek bar, drawn from the track's own analysis.
@@ -31,12 +37,16 @@ const AHEAD_DIM = 0.45;
  * and a thousand elements re-laid-out thirty times a second is exactly the kind
  * of thing that steals CPU from the audio callback.
  *
- * Three things are drawn at once, and each answers a different question. The
- * filled body is RMS -- what the arrangement is doing. The faint outline is
- * peak -- what the limiter is doing, which on a modern master is a flat line
- * near the top and is precisely why it cannot be the only thing shown. The
- * colour is the low/mid/high mix, so a breakdown reads differently from a drop
- * rather than merely being slightly shorter.
+ * Drawn as one continuous shape rather than a row of bars: the envelope curves
+ * through the midpoints between samples, at one sample per pixel, so it reads
+ * as a waveform and not as a barcode.
+ *
+ * Three things are shown at once. The solid body is RMS -- what the
+ * arrangement is doing. The diffuse aura around it is peak -- what the limiter
+ * is doing, which on a modern master is pinned at the ceiling nearly
+ * everywhere, which is exactly why it gets light ink and cannot be the only
+ * thing drawn. The colour is the low/mid/high mix measured against the track's
+ * own average, so a breakdown reads differently from a drop.
  */
 export const Waveform = memo(function Waveform({
   data,
@@ -47,6 +57,15 @@ export const Waveform = memo(function Waveform({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  /**
+   * The shape, resolved to this bar's width.
+   *
+   * Kept between renders because it depends only on the track and the width,
+   * while this component redraws on every position tick. Rebuilding it thirty
+   * times a second to move a playhead would be work the audio thread has to
+   * compete with.
+   */
+  const shapeRef = useRef<Shape | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -80,61 +99,45 @@ export const Waveform = memo(function Waveform({
       return;
     }
 
-    const palette = bandPalette(accent);
-    const barWidth = 2;
-    const gap = 1;
-    const columns = Math.max(1, Math.floor(width / (barWidth + gap)));
+    const cached = shapeRef.current;
+    const shape =
+      cached && cached.data === data && cached.width === width && cached.accent === accent
+        ? cached
+        : buildShape(data, width, accent);
+    shapeRef.current = shape;
+    const { peaks, bodies, colours, points } = shape;
     const usable = height - 2;
+    const half = (levels: Float32Array, index: number) =>
+      Math.max(0.75, (levels[index] * usable) / 2);
 
-    for (let column = 0; column < columns; column += 1) {
-      const from = Math.floor((column * data.buckets) / columns);
-      const to = Math.max(from + 1, Math.floor(((column + 1) * data.buckets) / columns));
+    const paint = (from: number, to: number, opacity: number) => {
+      if (to - from < 0.5) return;
+      context.save();
+      context.beginPath();
+      context.rect(from, 0, to - from, height);
+      context.clip();
 
-      // Peak collapses with a maximum -- a transient that survives all the way
-      // to the screen is what makes a waveform recognisable. RMS collapses with
-      // a mean, because it is already an average and taking maxima of averages
-      // just adds a comb of noise to a smooth envelope.
-      let peak = 0;
-      let rmsTotal = 0;
-      let rmsCount = 0;
-      // Colour is weighted by level, so one loud bucket in a column decides its
-      // colour rather than being averaged away by the silence either side.
-      let low = 0;
-      let mid = 0;
-      let high = 0;
-      let weight = 0;
-      for (let index = from; index < to && index < data.buckets; index += 1) {
-        const body = data.rms[index];
-        if (data.peak[index] > peak) peak = data.peak[index];
-        rmsTotal += body;
-        rmsCount += 1;
-        const w = body + 1;
-        low += data.low[index] * w;
-        mid += data.mid[index] * w;
-        high += data.high[index] * w;
-        weight += w;
-      }
-      if (weight > 0) {
-        low /= weight;
-        mid /= weight;
-        high /= weight;
-      }
-      const rms = rmsCount > 0 ? rmsTotal / rmsCount : 0;
+      const fill = gradient(context, colours, width, 1);
 
-      const x = column * (barWidth + gap);
-      const played = x + barWidth <= boundary;
-      const colour = blend(palette, low, mid, high, played ? 1 : AHEAD_DIM);
+      // Peak first as a soft aura, then the body solid on top. The peak
+      // carries far less information than the body on a modern master -- it is
+      // pinned at the ceiling nearly everywhere -- so it gets light, diffuse
+      // ink rather than either a dark slab or a hard outline with a hollow
+      // gap inside it.
+      context.globalAlpha = 0.22 * opacity;
+      ribbon(context, peaks, half, middle, points, width);
+      context.fillStyle = fill;
+      context.fill();
 
-      const peakHeight = Math.max(1, level(peak) * usable);
-      const rmsHeight = Math.max(1, level(rms) * usable);
+      context.globalAlpha = opacity;
+      ribbon(context, bodies, half, middle, points, width);
+      context.fillStyle = fill;
+      context.fill();
+      context.restore();
+    };
 
-      // Outline first, body over it, so the peak reads as a halo around the
-      // RMS rather than a separate shape competing with it.
-      context.fillStyle = colour(played ? 0.22 : 0.12);
-      context.fillRect(x, middle - peakHeight / 2, barWidth, peakHeight);
-      context.fillStyle = colour(1);
-      context.fillRect(x, middle - rmsHeight / 2, barWidth, rmsHeight);
-    }
+    paint(boundary, width, AHEAD_FADE);
+    paint(0, boundary, 1);
   }, [data, progress, height]);
 
   const fractionAt = useCallback((clientX: number) => {
@@ -180,43 +183,223 @@ function level(byte: number): number {
 
 type Rgb = [number, number, number];
 
+interface Shape {
+  data: WaveformData;
+  width: number;
+  accent: string;
+  points: number;
+  peaks: Float32Array;
+  bodies: Float32Array;
+  colours: Rgb[];
+}
+
 /**
- * Three tones for the three bands, derived from the artwork accent rather than
- * fixed.
+ * Resolve a stored waveform to one sample per pixel of this bar.
  *
- * A red/green/blue split would read instantly and look like a test card in a
- * player whose whole palette is pulled from the cover. Staying on the accent's
- * hue and separating the bands by depth and paleness keeps the picture: bass is
- * the deep, saturated end, air is the pale end, and the mids are the accent
- * itself.
+ * One per pixel because the shape is a curve, not a row of bars, so there is
+ * no reason to quantise it to anything coarser than the screen.
+ */
+function buildShape(data: WaveformData, width: number, accent: string): Shape {
+  const palette = bandPalette(accent);
+  const points = Math.max(2, Math.floor(width));
+  const peaks = new Float32Array(points);
+    const bodies = new Float32Array(points);
+    const colours: Rgb[] = new Array(points);
+    const mix = new Float32Array(points * 3);
+
+    for (let index = 0; index < points; index += 1) {
+      const from = Math.floor((index * data.buckets) / points);
+      const to = Math.max(from + 1, Math.floor(((index + 1) * data.buckets) / points));
+
+      // Peak collapses with a maximum -- a transient that survives all the way
+      // to the screen is what makes a waveform recognisable. RMS collapses with
+      // a mean, because it is already an average and taking maxima of averages
+      // just adds a comb of noise to a smooth envelope.
+      let peak = 0;
+      let total = 0;
+      let count = 0;
+      // Colour is weighted by level, so one loud bucket decides a column's
+      // colour rather than being averaged away by the silence either side.
+      let low = 0;
+      let mid = 0;
+      let high = 0;
+      let weight = 0;
+      for (let bucket = from; bucket < to && bucket < data.buckets; bucket += 1) {
+        const body = data.rms[bucket];
+        if (data.peak[bucket] > peak) peak = data.peak[bucket];
+        total += body;
+        count += 1;
+        const w = body + 1;
+        low += data.low[bucket] * w;
+        mid += data.mid[bucket] * w;
+        high += data.high[bucket] * w;
+        weight += w;
+      }
+      peaks[index] = level(peak);
+      bodies[index] = level(count > 0 ? total / count : 0);
+      mix[index * 3] = weight > 0 ? low / weight : 85;
+      mix[index * 3 + 1] = weight > 0 ? mid / weight : 85;
+      mix[index * 3 + 2] = weight > 0 ? high / weight : 85;
+    }
+
+    // Colour by how each moment differs from this track's own average, not by
+    // the absolute split. Music is bass-dominant nearly everywhere, so absolute
+    // proportions give every column of every track the same colour; measured
+    // against the track's own norm, the kick dropping out of a breakdown and
+    // the hats arriving both show up.
+    const average = [0, 0, 0];
+    for (let index = 0; index < points; index += 1) {
+      average[0] += mix[index * 3];
+      average[1] += mix[index * 3 + 1];
+      average[2] += mix[index * 3 + 2];
+    }
+    for (let band = 0; band < 3; band += 1) average[band] = average[band] / points || 1;
+    for (let index = 0; index < points; index += 1) {
+      colours[index] = mixed(
+        palette,
+        mix[index * 3] / average[0],
+        mix[index * 3 + 1] / average[1],
+        mix[index * 3 + 2] / average[2],
+      );
+    }
+
+    // A light smoothing pass. The measurements are honest either way; this only
+    // decides whether the eye reads a shape or a picket fence.
+    // The peak envelope is jagged by nature, so it is smoothed harder: it is
+    // drawn as an outline and an outline that jitters reads as noise.
+    smooth(peaks, 4);
+    smooth(bodies, 2);
+
+
+  // A light smoothing pass. The measurements are honest either way; this only
+  // decides whether the eye reads a shape or a picket fence.
+  //
+  // The peak envelope is smoothed harder: it is drawn as a diffuse aura, and
+  // an aura that jitters reads as noise.
+  smooth(peaks, 4);
+  smooth(bodies, 2);
+
+  return { data, width, accent, points, peaks, bodies, colours };
+}
+
+
+/**
+ * A closed ribbon: the envelope along the top, mirrored along the bottom.
+ *
+ * Curves through the midpoints between samples rather than joining them with
+ * straight lines, which is what stops a loud passage looking like a row of
+ * fence posts.
+ */
+function ribbon(
+  context: CanvasRenderingContext2D,
+  levels: Float32Array,
+  half: (levels: Float32Array, index: number) => number,
+  middle: number,
+  points: number,
+  width: number,
+) {
+  const x = (index: number) => (index * width) / (points - 1);
+  context.beginPath();
+  context.moveTo(0, middle - half(levels, 0));
+  for (let index = 0; index < points - 1; index += 1) {
+    const cx = (x(index) + x(index + 1)) / 2;
+    const cy = middle - (half(levels, index) + half(levels, index + 1)) / 2;
+    context.quadraticCurveTo(x(index), middle - half(levels, index), cx, cy);
+  }
+  context.lineTo(width, middle - half(levels, points - 1));
+  context.lineTo(width, middle + half(levels, points - 1));
+  for (let index = points - 1; index > 0; index -= 1) {
+    const cx = (x(index) + x(index - 1)) / 2;
+    const cy = middle + (half(levels, index) + half(levels, index - 1)) / 2;
+    context.quadraticCurveTo(x(index), middle + half(levels, index), cx, cy);
+  }
+  context.lineTo(0, middle + half(levels, 0));
+  context.closePath();
+}
+
+/** A small moving average, in place. */
+function smooth(values: Float32Array, radius: number) {
+  const source = Float32Array.from(values);
+  for (let index = 0; index < values.length; index += 1) {
+    let total = 0;
+    let count = 0;
+    for (let offset = -radius; offset <= radius; offset += 1) {
+      const at = index + offset;
+      if (at < 0 || at >= source.length) continue;
+      total += source[at];
+      count += 1;
+    }
+    values[index] = total / count;
+  }
+}
+
+/**
+ * One gradient across the whole bar, sampled from the per-column colours.
+ *
+ * A gradient rather than a colour per bar: the point of drawing this as a
+ * continuous shape is that the colour moves continuously too, so a breakdown
+ * bleeds into the drop after it instead of stepping.
+ */
+function gradient(
+  context: CanvasRenderingContext2D,
+  colours: Rgb[],
+  width: number,
+  brightness: number,
+): CanvasGradient {
+  const fill = context.createLinearGradient(0, 0, width, 0);
+  const stops = Math.min(64, colours.length);
+  for (let stop = 0; stop < stops; stop += 1) {
+    const at = stop / (stops - 1);
+    const [r, g, b] = colours[Math.min(colours.length - 1, Math.round(at * (colours.length - 1)))];
+    fill.addColorStop(
+      at,
+      `rgb(${Math.round(r * brightness)},${Math.round(g * brightness)},${Math.round(b * brightness)})`,
+    );
+  }
+  return fill;
+}
+
+/**
+ * Three tones for the three bands, derived from the artwork accent.
+ *
+ * Spread widely on purpose. Keeping all three within a few degrees of the
+ * accent is coherent and unreadable -- every track comes out one flat colour.
+ * Bass runs hot and deep, air runs bright and cool, and the mids sit on the
+ * accent itself, so the colour says something before you have read anything.
  */
 function bandPalette(accent: string): [Rgb, Rgb, Rgb] {
   const [h, s, l] = toHsl(parseHex(accent) ?? [232, 163, 61]);
+  const saturated = Math.max(0.62, Math.min(1, s * 1.35));
   return [
-    toRgb(h - 12, Math.min(1, s * 1.15), l * 0.45),
-    toRgb(h, s, l),
-    toRgb(h + 20, s * 0.3, Math.min(0.96, l * 1.62)),
+    // Deep and hot.
+    toRgb(h - 26, Math.min(1, saturated * 1.05), Math.max(0.26, l * 0.58)),
+    toRgb(h, saturated, Math.min(0.66, l * 1.05)),
+    // Bright, and still coloured -- desaturating the top band to near-white was
+    // what washed the whole waveform out to beige.
+    toRgb(h + 46, Math.max(0.5, saturated * 0.8), Math.min(0.86, l * 1.45)),
   ];
 }
 
-/** Mix the three band tones by a column's energy split. */
-function blend(
-  palette: [Rgb, Rgb, Rgb],
-  low: number,
-  mid: number,
-  high: number,
-  brightness: number,
-): (alpha: number) => string {
+/**
+ * Mix the three band tones from a column's share of each band relative to the
+ * track's own average.
+ *
+ * A column that is exactly average in all three comes out on the accent. More
+ * bass than usual pulls it deep and hot, more air than usual pulls it bright.
+ * The exponent widens the gap between those, because the underlying ratios
+ * spend most of their time close to one.
+ */
+function mixed(palette: [Rgb, Rgb, Rgb], low: number, mid: number, high: number): Rgb {
+  const CONTRAST = 2.6;
+  low = Math.pow(Math.max(0, low), CONTRAST);
+  mid = Math.pow(Math.max(0, mid), CONTRAST);
+  high = Math.pow(Math.max(0, high), CONTRAST);
   const total = low + mid + high || 1;
   const channel = (index: number) =>
     Math.round(
-      ((palette[0][index] * low + palette[1][index] * mid + palette[2][index] * high) / total) *
-        brightness,
+      (palette[0][index] * low + palette[1][index] * mid + palette[2][index] * high) / total,
     );
-  const r = channel(0);
-  const g = channel(1);
-  const b = channel(2);
-  return (alpha: number) => `rgba(${r},${g},${b},${alpha})`;
+  return [channel(0), channel(1), channel(2)];
 }
 
 function parseHex(value: string): Rgb | null {

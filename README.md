@@ -58,7 +58,8 @@ Working today:
 - Smart playlists whose rules are stored rather than their contents
 - "Build a set that flows from this track", using tempo, key and loudness
 - Album grid, album view, now playing, queue, command palette
-- Waveform seek bar showing RMS, peak, and the low/mid/high mix as colour
+- Waveform seek bar: one continuous shape, RMS filled with peak as an aura,
+  coloured by the low/mid/high mix
 - One accent colour, sampled from the current cover
 
 Deliberately correct, because each is easy to get wrong:
@@ -102,6 +103,11 @@ Deliberately correct, because each is easy to get wrong:
   outline, and the low/mid/high mix as colour, on a decibel scale with a fixed
   floor. Fixed rather than per-track, so two tracks are comparable and a
   squashed master is allowed to look squashed.
+- **Colour has to be relative to the track, not absolute.** Music is
+  bass-dominant nearly everywhere, so colouring by the raw low/mid/high split
+  gives every column of every track the same colour -- faithful and useless.
+  Each moment is measured against that track's own average instead, so the kick
+  dropping out of a breakdown and the hats arriving both show up.
 - **Band energy has to be compared logarithmically.** Spectral density in music
   falls roughly 30dB from the bass to the top octave, so a linear comparison
   makes every track ever recorded read as pure bass; summing raw magnitudes
