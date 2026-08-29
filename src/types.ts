@@ -298,3 +298,10 @@ export interface NameFields {
   track: boolean;
   overwrite: boolean;
 }
+
+export interface UndoBatch {
+  id: number;
+  description: string;
+  tracks: number;
+  createdAt: number;
+}

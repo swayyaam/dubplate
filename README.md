@@ -54,6 +54,7 @@ Working today:
   transcode, and the distribution of formats, rates and depths
 - Tag editor: one track or many, writing to the files themselves
 - Tags from filenames, in bulk, previewed before anything is written
+- Undo, for the last twenty-five tag writes, covers included
 - Smart playlists whose rules are stored rather than their contents
 - "Build a set that flows from this track", using tempo, key and loudness
 - Album grid, album view, now playing, queue, command palette
@@ -73,8 +74,16 @@ Deliberately correct, because each is easy to get wrong:
   content_key)` itself, so the next scan sees a file it already knows.
 - **Writes go through a copy and a rename**, which is atomic within a
   directory. An interrupted write leaves the old file or the new one, never
-  half of either. There is no undo, so the bulk operation previews everything
-  first.
+  half of either.
+- **Undo is the write path pointed backwards**, not a second implementation of
+  it: every write records what the fields held before, and undoing replays
+  those values through the same code. Only the newest operation can be undone,
+  because reversing an older edit while a newer one still stands would produce
+  a state the files were never in.
+- **Tag conventions have to be written in the right order.** Saving the native
+  chunk after ID3v2 rewrites the container's chunk list, and the ID3v2 chunk
+  written moments earlier is silently gone -- no error, it simply is not there
+  when the file is read back. Native first, ID3v2 second.
 - **WAV and AIFF are tagged twice.** Both containers support a native text
   chunk and an embedded ID3v2 chunk, and software disagrees about which to
   read: Rekordbox and Serato prefer ID3v2, older tools read the native chunk.

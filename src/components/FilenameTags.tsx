@@ -159,7 +159,7 @@ export function FilenameTags({ onClose, onWritten }: Props) {
 
         <footer className="sheet__foot">
           <span className="sheet__hint">
-            Writes to {chosen.size} file{chosen.size === 1 ? "" : "s"}. There is no undo.
+            Writes to {chosen.size} file{chosen.size === 1 ? "" : "s"}, and can be undone in one step.
           </span>
           <div className="sheet__actions">
             <button type="button" className="chip" onClick={onClose} disabled={busy}>

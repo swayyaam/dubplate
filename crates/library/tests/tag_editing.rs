@@ -6,7 +6,13 @@ use common::{tag, write_wav_seeded};
 use dubplate_library::tags::{
     self, ArtworkChange, Field, FieldChange, NameFields, TagEdit,
 };
+use dubplate_library::undo::{self, UndoStore};
 use dubplate_library::{index, Library};
+
+/// Every write needs somewhere to put what it replaced.
+fn store(dir: &Path) -> UndoStore {
+    UndoStore::new(dir.join(".undo"))
+}
 
 fn library_with(dir: &Path, names: &[&str]) -> Library {
     for (position, name) in names.iter().enumerate() {
@@ -47,7 +53,7 @@ fn a_written_tag_can_be_read_back_from_the_file() {
         ],
         artwork: None,
     };
-    let report = tags::write(&mut library, &ids, &edit).unwrap();
+    let report = tags::write(&mut library, &store(dir.path()), &ids, &edit).unwrap();
     assert_eq!(report.written, 1, "{:?}", report.outcomes);
     assert_eq!(report.failed, 0);
 
@@ -73,6 +79,7 @@ fn a_wav_is_tagged_in_both_conventions_it_supports() {
 
     tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![set(Field::Title, "Both Places")],
@@ -122,6 +129,7 @@ fn editing_one_field_across_a_selection_leaves_the_others_alone() {
 
     tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![set(Field::AlbumArtist, "Various")],
@@ -147,6 +155,7 @@ fn an_empty_value_clears_the_field() {
 
     tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![FieldChange {
@@ -171,6 +180,7 @@ fn a_number_field_refuses_something_that_is_not_a_number() {
 
     let report = tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![set(Field::Year, "nineteen eighty four")],
@@ -205,6 +215,7 @@ fn a_tag_edit_does_not_cost_the_track_its_analysis() {
 
     tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![set(Field::Title, "Renamed")],
@@ -243,6 +254,7 @@ fn a_failed_write_leaves_the_original_file_untouched() {
 
     let report = tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![set(Field::TrackNumber, "not a number")],
@@ -275,6 +287,7 @@ fn artwork_can_be_added_and_removed() {
     assert!(!tags::has_artwork(&path));
     let report = tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![],
@@ -289,6 +302,7 @@ fn artwork_can_be_added_and_removed() {
 
     tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![],
@@ -309,6 +323,7 @@ fn something_that_is_not_an_image_is_refused() {
 
     let report = tags::write(
         &mut library,
+        &store(dir.path()),
         &ids,
         &TagEdit {
             fields: vec![],
@@ -337,7 +352,7 @@ fn filenames_fill_in_what_is_missing_without_overwriting_what_is_there() {
     assert_eq!(preview[0].guess.artist.as_deref(), Some("Some Artist"));
     assert_eq!(preview[0].current_title.as_deref(), Some("The Real Title"));
 
-    let report = tags::apply_names(&mut library, &ids, NameFields::default()).unwrap();
+    let report = tags::apply_names(&mut library, &store(dir.path()), &ids, NameFields::default()).unwrap();
     assert_eq!(report.written, 1, "{:?}", report.outcomes);
 
     let values = tags::read_one(&path).unwrap();
@@ -359,6 +374,7 @@ fn overwriting_is_possible_but_has_to_be_asked_for() {
 
     tags::apply_names(
         &mut library,
+        &store(dir.path()),
         &ids,
         NameFields {
             overwrite: true,
@@ -392,3 +408,340 @@ const ONE_PIXEL_PNG: &[u8] = &[
     0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
     0x44, 0xAE, 0x42, 0x60, 0x82,
 ];
+
+#[test]
+fn undo_restores_what_a_field_edit_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let path = dir.path().join("one.wav");
+    tag(&path, "Original", "Original Artist", "Original Album");
+    let ids = ids(&library);
+
+    tags::write(
+        &mut library,
+        &store,
+        &ids,
+        &TagEdit {
+            fields: vec![set(Field::Title, "Replaced"), set(Field::Genre, "House")],
+            artwork: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        tags::read_one(&path).unwrap().get(&Field::Title).map(String::as_str),
+        Some("Replaced")
+    );
+
+    let batch = undo::newest(&library).unwrap().expect("a batch to undo");
+    let report = tags::undo_batch(&mut library, &store, batch).unwrap();
+    assert_eq!(report.written, 1, "{:?}", report.outcomes);
+
+    let values = tags::read_one(&path).unwrap();
+    assert_eq!(values.get(&Field::Title).map(String::as_str), Some("Original"));
+    // Genre had no value before, so undoing must clear it rather than leave
+    // "House" or write an empty string.
+    assert_eq!(values.get(&Field::Genre), None);
+    // And a field the edit never touched is still exactly as it was.
+    assert_eq!(values.get(&Field::Album).map(String::as_str), Some("Original Album"));
+}
+
+#[test]
+fn undo_only_touches_the_fields_the_edit_did() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let path = dir.path().join("one.wav");
+    tag(&path, "Title", "Artist", "Album");
+    let ids = ids(&library);
+
+    tags::write(
+        &mut library,
+        &store,
+        &ids,
+        &TagEdit {
+            fields: vec![set(Field::Comment, "a note")],
+            artwork: None,
+        },
+    )
+    .unwrap();
+
+    // Something else changes the title in between, the way another tagger
+    // would. Undoing the comment must not resurrect an old title.
+    tag(&path, "Changed Elsewhere", "Artist", "Album");
+
+    let batch = undo::newest(&library).unwrap().unwrap();
+    tags::undo_batch(&mut library, &store, batch).unwrap();
+
+    let values = tags::read_one(&path).unwrap();
+    assert_eq!(values.get(&Field::Comment), None, "the comment came off");
+    assert_eq!(
+        values.get(&Field::Title).map(String::as_str),
+        Some("Changed Elsewhere"),
+        "an untouched field is left alone"
+    );
+}
+
+#[test]
+fn undo_brings_a_replaced_cover_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let path = dir.path().join("one.wav");
+    let first = dir.path().join("first.png");
+    std::fs::write(&first, ONE_PIXEL_PNG).unwrap();
+    let ids = ids(&library);
+
+    // Give it a cover, then remove it, then undo the removal.
+    tags::write(
+        &mut library,
+        &store,
+        &ids,
+        &TagEdit {
+            fields: vec![],
+            artwork: Some(ArtworkChange::Set {
+                path: first.to_string_lossy().into_owned(),
+            }),
+        },
+    )
+    .unwrap();
+    assert!(tags::has_artwork(&path));
+
+    tags::write(
+        &mut library,
+        &store,
+        &ids,
+        &TagEdit {
+            fields: vec![],
+            artwork: Some(ArtworkChange::Remove),
+        },
+    )
+    .unwrap();
+    assert!(!tags::has_artwork(&path));
+
+    let batch = undo::newest(&library).unwrap().unwrap();
+    tags::undo_batch(&mut library, &store, batch).unwrap();
+    assert!(tags::has_artwork(&path), "the cover came back");
+}
+
+#[test]
+fn undoing_an_added_cover_removes_it_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let path = dir.path().join("one.wav");
+    let png = dir.path().join("cover.png");
+    std::fs::write(&png, ONE_PIXEL_PNG).unwrap();
+    let ids = ids(&library);
+
+    tags::write(
+        &mut library,
+        &store,
+        &ids,
+        &TagEdit {
+            fields: vec![],
+            artwork: Some(ArtworkChange::Set {
+                path: png.to_string_lossy().into_owned(),
+            }),
+        },
+    )
+    .unwrap();
+    assert!(tags::has_artwork(&path));
+
+    let batch = undo::newest(&library).unwrap().unwrap();
+    tags::undo_batch(&mut library, &store, batch).unwrap();
+    assert!(!tags::has_artwork(&path), "there was no cover before, so there is none now");
+}
+
+#[test]
+fn a_bulk_filename_apply_can_be_taken_back_in_one_go() {
+    // The operation undo exists for: a hundred and fifty files at once.
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(
+        dir.path(),
+        &["A - One", "B - Two", "C - Three"],
+    );
+    let ids = ids(&library);
+
+    let report = tags::apply_names(&mut library, &store, &ids, NameFields::default()).unwrap();
+    assert_eq!(report.written, 3, "{:?}", report.outcomes);
+    for (name, artist) in [("A - One", "A"), ("B - Two", "B"), ("C - Three", "C")] {
+        let values = tags::read_one(&dir.path().join(format!("{name}.wav"))).unwrap();
+        assert_eq!(values.get(&Field::Artist).map(String::as_str), Some(artist));
+    }
+
+    let batch = undo::newest(&library).unwrap().unwrap();
+    let report = tags::undo_batch(&mut library, &store, batch).unwrap();
+    assert_eq!(report.written, 3);
+
+    for name in ["A - One", "B - Two", "C - Three"] {
+        let values = tags::read_one(&dir.path().join(format!("{name}.wav"))).unwrap();
+        assert_eq!(values.get(&Field::Artist), None, "{name} went back to untagged");
+        assert_eq!(values.get(&Field::Title), None);
+    }
+}
+
+#[test]
+fn undoing_does_not_cost_the_track_its_analysis_either() {
+    // Undo is a write like any other, so it has the same obligation.
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let ids = ids(&library);
+
+    tags::write(
+        &mut library,
+        &store,
+        &ids,
+        &TagEdit {
+            fields: vec![set(Field::Title, "Something")],
+            artwork: None,
+        },
+    )
+    .unwrap();
+    library
+        .connection()
+        .execute("UPDATE tracks SET analyzed_at = 222, bpm = 140.0", [])
+        .unwrap();
+
+    let batch = undo::newest(&library).unwrap().unwrap();
+    tags::undo_batch(&mut library, &store, batch).unwrap();
+
+    let report = index::sync(&mut library, dir.path()).unwrap();
+    assert_eq!(report.unchanged, 1);
+    let bpm: Option<f64> = library
+        .connection()
+        .query_row("SELECT bpm FROM tracks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(bpm, Some(140.0));
+}
+
+#[test]
+fn several_operations_undo_newest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let path = dir.path().join("one.wav");
+    let ids = ids(&library);
+
+    for title in ["First", "Second", "Third"] {
+        tags::write(
+            &mut library,
+            &store,
+            &ids,
+            &TagEdit {
+                fields: vec![set(Field::Title, title)],
+                artwork: None,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(undo::history(&library).unwrap().len(), 3);
+
+    // Walking back one at a time returns each earlier state in turn.
+    for expected in ["Second", "First", ""] {
+        let batch = undo::newest(&library).unwrap().unwrap();
+        tags::undo_batch(&mut library, &store, batch).unwrap();
+        let values = tags::read_one(&path).unwrap();
+        let title = values.get(&Field::Title).cloned().unwrap_or_default();
+        assert_eq!(title, expected);
+    }
+    assert!(undo::history(&library).unwrap().is_empty(), "nothing left to undo");
+    assert_eq!(undo::newest(&library).unwrap(), None);
+}
+
+#[test]
+fn history_is_bounded_and_old_covers_are_swept_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let ids = ids(&library);
+
+    for n in 0..(undo::HISTORY + 6) {
+        tags::write(
+            &mut library,
+            &store,
+            &ids,
+            &TagEdit {
+                fields: vec![set(Field::Title, &format!("Take {n}"))],
+                artwork: None,
+            },
+        )
+        .unwrap();
+    }
+
+    let history = undo::history(&library).unwrap();
+    assert_eq!(history.len(), undo::HISTORY, "older operations were pruned");
+    // And nothing was orphaned in the blob store.
+    let blobs = std::fs::read_dir(store.root())
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0);
+    assert_eq!(blobs, 0, "no covers were involved, so none are kept");
+}
+
+#[test]
+fn a_write_that_failed_is_not_offered_for_undo() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let mut library = library_with(dir.path(), &["one"]);
+    let ids = ids(&library);
+
+    let report = tags::write(
+        &mut library,
+        &store,
+        &ids,
+        &TagEdit {
+            fields: vec![set(Field::Year, "not a year")],
+            artwork: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.failed, 1);
+    assert!(
+        undo::history(&library).unwrap().is_empty(),
+        "nothing happened, so there is nothing to take back"
+    );
+}
+
+#[test]
+fn a_wav_that_already_had_id3_still_gets_both_conventions() {
+    // The order tags are saved in decides whether both survive. Written the
+    // wrong way round, the RIFF INFO chunk goes in as far as memory, the save
+    // reports success, and the chunk is simply absent when the file is read
+    // back -- so a file that arrived with ID3v2 tags would quietly keep only
+    // half of what this writes.
+    use lofty::file::TaggedFileExt;
+    use lofty::prelude::Accessor;
+    use lofty::tag::{ItemKey, TagType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut library = library_with(dir.path(), &["one"]);
+    let path = dir.path().join("one.wav");
+    // Arrives with an ID3v2 chunk and nothing else, as a real download does.
+    tag(&path, "Before", "Artist", "Album");
+    let ids = ids(&library);
+
+    tags::write(
+        &mut library,
+        &store(dir.path()),
+        &ids,
+        &TagEdit {
+            fields: vec![set(Field::Title, "After")],
+            artwork: None,
+        },
+    )
+    .unwrap();
+
+    let file = lofty::read_from_path(&path).unwrap();
+    assert_eq!(
+        file.tag(TagType::Id3v2).and_then(|t| t.title()).as_deref(),
+        Some("After")
+    );
+    let riff = file.tag(TagType::RiffInfo).expect("a RIFF INFO chunk");
+    assert_eq!(riff.get_string(ItemKey::TrackTitle), Some("After"));
+    // The new chunk carries what the file already said, not just the one
+    // field that was edited, so the two conventions cannot disagree.
+    assert_eq!(riff.get_string(ItemKey::TrackArtist), Some("Artist"));
+    assert_eq!(riff.get_string(ItemKey::AlbumTitle), Some("Album"));
+}

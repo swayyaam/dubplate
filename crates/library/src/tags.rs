@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lofty::config::{ParseOptions, ParsingMode, WriteOptions};
-use lofty::file::{AudioFile, FileType, TaggedFileExt};
+use lofty::file::{FileType, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{ItemKey, Tag, TagType};
@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Library;
 use crate::scan;
+use crate::undo::{self, Previous, PreviousField, UndoStore};
 
 /// A tag field the editor can change.
 ///
@@ -255,17 +256,122 @@ pub fn has_artwork(path: &Path) -> bool {
 /// Each file is written independently: a failure is recorded and the rest
 /// continue, because a selection of a hundred should not be abandoned because
 /// one of them is read-only.
-pub fn write(library: &mut Library, ids: &[i64], edit: &TagEdit) -> Result<WriteReport> {
+pub fn write(
+    library: &mut Library,
+    store: &UndoStore,
+    ids: &[i64],
+    edit: &TagEdit,
+) -> Result<WriteReport> {
     let mut report = WriteReport::default();
     if edit.is_empty() {
         return Ok(report);
     }
 
+    let cover = resolve_cover(&edit.artwork)?;
+    let touched: Vec<Field> = edit.fields.iter().map(|change| change.field).collect();
     let paths = paths_for(library, ids)?;
     let mut updates = Vec::new();
+    let mut previous = Vec::new();
 
     for (id, path) in paths {
-        match write_one(Path::new(&path), edit) {
+        let file = Path::new(&path);
+        // Captured before the write, kept only if the write succeeds: offering
+        // to undo something that never happened is worse than offering nothing.
+        let before = capture(file, &touched, cover.is_some());
+
+        match write_one(file, edit, cover.as_ref()) {
+            Ok(()) => {
+                report.written += 1;
+                updates.push((id, path.clone()));
+                previous.push(Previous {
+                    track_id: id,
+                    path: path.clone(),
+                    fields: before.0,
+                    artwork: before.1,
+                });
+                report.outcomes.push(WriteOutcome { id, path, error: None });
+            }
+            Err(error) => {
+                report.failed += 1;
+                report.outcomes.push(WriteOutcome {
+                    id,
+                    path,
+                    error: Some(format!("{error:#}")),
+                });
+            }
+        }
+    }
+
+    resync(library, &updates)?;
+    undo::record(library, store, "Edit tags", &previous)?;
+    Ok(report)
+}
+
+/// What a file holds now, for the fields a write is about to change.
+///
+/// Only those fields: recording all twelve would make undo restore values the
+/// operation never touched, which is not what undoing an operation means.
+fn capture(
+    path: &Path,
+    fields: &[Field],
+    artwork: bool,
+) -> (Vec<PreviousField>, Option<Option<Vec<u8>>>) {
+    let values = read_one(path).unwrap_or_default();
+    let previous = fields
+        .iter()
+        .map(|field| PreviousField {
+            field: *field,
+            value: values.get(field).cloned(),
+        })
+        .collect();
+    let cover = artwork.then(|| current_artwork(path));
+    (previous, cover)
+}
+
+/// Put a recorded batch back.
+///
+/// The same write path in reverse, so it cannot drift from what writing does.
+/// It restores tags only -- it never touches audio -- and it does not check
+/// whether something else has edited the file since, because sequential undo
+/// of several operations would then block itself.
+pub fn undo_batch(
+    library: &mut Library,
+    store: &UndoStore,
+    batch: i64,
+) -> Result<WriteReport> {
+    let mut report = WriteReport::default();
+    let entries = undo::entries(library, batch)?;
+    let mut updates = Vec::new();
+
+    for entry in entries {
+        let (id, path) = (entry.track_id, entry.path);
+        let file = Path::new(&path);
+        let edit = TagEdit {
+            fields: entry
+                .fields
+                .into_iter()
+                .map(|previous| FieldChange {
+                    field: previous.field,
+                    value: previous.value,
+                })
+                .collect(),
+            artwork: None,
+        };
+        // -1 means the write never touched artwork, so undo must not either.
+        let cover = match entry.had_art {
+            1 => entry
+                .art_blob
+                .as_deref()
+                .and_then(|hash| undo::artwork_for(store, hash))
+                .map(Cover::Set),
+            0 => Some(Cover::Remove),
+            _ => None,
+        };
+
+        if edit.fields.is_empty() && cover.is_none() {
+            continue;
+        }
+        match write_one(file, &edit, cover.as_ref()) {
             Ok(()) => {
                 report.written += 1;
                 updates.push((id, path.clone()));
@@ -283,37 +389,83 @@ pub fn write(library: &mut Library, ids: &[i64], edit: &TagEdit) -> Result<Write
     }
 
     resync(library, &updates)?;
+    // Dropped whether or not every file came back: a batch that half applied
+    // cannot be offered again as if it were intact.
+    undo::forget(library, store, batch)?;
     Ok(report)
 }
 
-/// Write one file, through a copy, and rename it into place.
-fn write_one(path: &Path, edit: &TagEdit) -> Result<()> {
-    let mut tagged = probe(path)?;
-    let file_type = tagged.file_type();
+/// An artwork change with its image already loaded.
+///
+/// Resolved once per operation rather than once per file: editing twelve
+/// tracks should read the chosen cover once, and undo supplies bytes it has
+/// rather than a path that may no longer exist.
+#[derive(Debug, Clone)]
+enum Cover {
+    Set(Vec<u8>),
+    Remove,
+}
 
-    for tag_type in write_targets(file_type) {
-        // A container that has never been tagged has no tag to modify, so one
-        // is created rather than the edit silently doing nothing.
-        if tagged.tag(tag_type).is_none() {
-            tagged.insert_tag(Tag::new(tag_type));
+fn resolve_cover(change: &Option<ArtworkChange>) -> Result<Option<Cover>> {
+    match change {
+        None => Ok(None),
+        Some(ArtworkChange::Remove) => Ok(Some(Cover::Remove)),
+        Some(ArtworkChange::Set { path }) => {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading the image at {path}"))?;
+            Ok(Some(Cover::Set(bytes)))
         }
-        let Some(tag) = tagged.tag_mut(tag_type) else {
-            continue;
-        };
-        apply(tag, edit)?;
     }
+}
+
+/// The cover a file currently carries, so a write can be undone.
+fn current_artwork(path: &Path) -> Option<Vec<u8>> {
+    let tagged = probe(path).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    tag.pictures().first().map(|picture| picture.data().to_vec())
+}
+
+/// Write one file, through a copy, and rename it into place.
+///
+/// Each tag convention is saved in its own pass over the copy. Handing lofty a
+/// file object carrying two tags and saving once looks tidier and quietly loses
+/// one of them: on a WAV that already had an ID3v2 chunk, the RIFF INFO tag
+/// went in as far as memory and no further. Saving them one at a time, each
+/// against the file as the previous pass left it, is what actually produces
+/// both chunks.
+fn write_one(path: &Path, edit: &TagEdit, cover: Option<&Cover>) -> Result<()> {
+    use lofty::tag::TagExt;
+
+    let tagged = probe(path)?;
+    let file_type = tagged.file_type();
+    let existing = tagged.primary_tag().or_else(|| tagged.first_tag()).cloned();
 
     let temp = temp_beside(path)?;
-    // Copy first: `save_to_path` rewrites the tags of an existing file, so the
-    // target has to already be this file, audio and all.
+    // Copy first: saving a tag rewrites an existing file, so the target has to
+    // already be this file, audio and all.
     std::fs::copy(path, &temp)
         .with_context(|| format!("copying {} before writing tags", path.display()))?;
 
-    let written = tagged.save_to_path(&temp, WriteOptions::default());
-    if let Err(error) = written {
+    let outcome = (|| -> Result<()> {
+        for tag_type in write_targets(file_type) {
+            let mut tag = match tagged.tag(tag_type) {
+                Some(tag) => tag.clone(),
+                // A convention this file has never carried starts from what the
+                // other one says, not from nothing. Two chunks that disagree
+                // are worse than one chunk, because which one a reader believes
+                // is then a coin toss.
+                None => seed(tag_type, existing.as_ref()),
+            };
+            apply(&mut tag, edit, cover)?;
+            tag.save_to_path(&temp, WriteOptions::default())
+                .with_context(|| format!("writing {tag_type:?} to {}", path.display()))?;
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = outcome {
         let _ = std::fs::remove_file(&temp);
-        return Err(anyhow::Error::new(error)
-            .context(format!("writing tags to {}", path.display())));
+        return Err(error);
     }
 
     std::fs::rename(&temp, path)
@@ -321,7 +473,24 @@ fn write_one(path: &Path, edit: &TagEdit) -> Result<()> {
     Ok(())
 }
 
-fn apply(tag: &mut Tag, edit: &TagEdit) -> Result<()> {
+/// A new tag of `tag_type`, carrying whatever the file already said.
+fn seed(tag_type: TagType, existing: Option<&Tag>) -> Tag {
+    let mut tag = Tag::new(tag_type);
+    let Some(existing) = existing else {
+        return tag;
+    };
+    for field in FIELDS {
+        if let Some(value) = existing.get_string(field.key()) {
+            tag.insert_text(field.key(), value.to_owned());
+        }
+    }
+    for picture in existing.pictures() {
+        tag.push_picture(picture.clone());
+    }
+    tag
+}
+
+fn apply(tag: &mut Tag, edit: &TagEdit, cover: Option<&Cover>) -> Result<()> {
     for change in &edit.fields {
         let key = change.field.key();
         match change.value.as_deref().map(str::trim) {
@@ -339,16 +508,14 @@ fn apply(tag: &mut Tag, edit: &TagEdit) -> Result<()> {
         }
     }
 
-    match &edit.artwork {
-        Some(ArtworkChange::Remove) => {
+    match cover {
+        Some(Cover::Remove) => {
             while !tag.pictures().is_empty() {
                 tag.remove_picture(0);
             }
         }
-        Some(ArtworkChange::Set { path }) => {
-            let bytes = std::fs::read(path)
-                .with_context(|| format!("reading the image at {path}"))?;
-            let picture = Picture::from_reader(&mut std::io::Cursor::new(&bytes))
+        Some(Cover::Set(bytes)) => {
+            let picture = Picture::from_reader(&mut std::io::Cursor::new(bytes))
                 .context("reading the supplied image")?;
             anyhow::ensure!(
                 !matches!(picture.mime_type(), None | Some(MimeType::Unknown(_))),
@@ -374,8 +541,14 @@ fn apply(tag: &mut Tag, edit: &TagEdit) -> Result<()> {
 /// so both are written. Everything else has exactly one sensible answer.
 fn write_targets(file_type: FileType) -> Vec<TagType> {
     match file_type {
-        FileType::Wav => vec![TagType::Id3v2, TagType::RiffInfo],
-        FileType::Aiff => vec![TagType::Id3v2, TagType::AiffText],
+        // The order matters and is not cosmetic. Writing the native chunk
+        // first and ID3v2 second leaves both in the file; the other way round,
+        // saving the native chunk rewrites the container's chunk list and the
+        // ID3v2 chunk written moments earlier is silently gone -- no error, it
+        // simply is not there when the file is read back. Established by
+        // writing real files and reading them again, and pinned by a test.
+        FileType::Wav => vec![TagType::RiffInfo, TagType::Id3v2],
+        FileType::Aiff => vec![TagType::AiffText, TagType::Id3v2],
         FileType::Flac | FileType::Vorbis | FileType::Opus | FileType::Speex => {
             vec![TagType::VorbisComments]
         }
@@ -600,10 +773,16 @@ pub fn preview_names(
 /// The guess is recomputed here rather than sent back from the preview: the
 /// parser is deterministic, so the two agree, and a client cannot ask for a
 /// value the parser would not have produced.
-pub fn apply_names(library: &mut Library, ids: &[i64], fields: NameFields) -> Result<WriteReport> {
+pub fn apply_names(
+    library: &mut Library,
+    store: &UndoStore,
+    ids: &[i64],
+    fields: NameFields,
+) -> Result<WriteReport> {
     let mut report = WriteReport::default();
     let paths = paths_for(library, ids)?;
     let mut updates = Vec::new();
+    let mut previous = Vec::new();
 
     for (id, path) in paths {
         let file = Path::new(&path);
@@ -648,10 +827,18 @@ pub fn apply_names(library: &mut Library, ids: &[i64], fields: NameFields) -> Re
             fields: changes,
             artwork: None,
         };
-        match write_one(file, &edit) {
+        let touched: Vec<Field> = edit.fields.iter().map(|change| change.field).collect();
+        let before = capture(file, &touched, false);
+        match write_one(file, &edit, None) {
             Ok(()) => {
                 report.written += 1;
                 updates.push((id, path.clone()));
+                previous.push(Previous {
+                    track_id: id,
+                    path: path.clone(),
+                    fields: before.0,
+                    artwork: before.1,
+                });
                 report.outcomes.push(WriteOutcome { id, path, error: None });
             }
             Err(error) => {
@@ -666,5 +853,6 @@ pub fn apply_names(library: &mut Library, ids: &[i64], fields: NameFields) -> Re
     }
 
     resync(library, &updates)?;
+    undo::record(library, store, "Tags from filenames", &previous)?;
     Ok(report)
 }

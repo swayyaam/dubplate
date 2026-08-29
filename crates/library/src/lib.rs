@@ -20,6 +20,7 @@ pub mod scan;
 pub mod smart;
 pub mod tags;
 pub mod track;
+pub mod undo;
 pub mod watch;
 
 pub use artwork::{ArtworkCache, ArtworkReport};

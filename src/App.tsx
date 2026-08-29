@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AlbumRow, LibraryStatus, SyncOutcome, TrackRow, View } from "./types";
+import type { AlbumRow, LibraryStatus, SyncOutcome, TrackRow, View, UndoBatch } from "./types";
 import { TrackTable } from "./components/TrackTable";
 import { TagEditor } from "./components/TagEditor";
 import { FilenameTags } from "./components/FilenameTags";
@@ -47,6 +47,14 @@ export default function App() {
   const [marked, setMarked] = useState<ReadonlySet<number>>(new Set());
   const [editing, setEditing] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  /** The most recent tag write, if it can still be taken back. */
+  const [undoable, setUndoable] = useState<UndoBatch | null>(null);
+
+  const refreshUndo = useCallback(() => {
+    void invoke<UndoBatch[]>("undo_history")
+      .then((batches) => setUndoable(batches[0] ?? null))
+      .catch(() => setUndoable(null));
+  }, []);
   const searchRef = useRef<HTMLInputElement>(null);
   const queryGeneration = useRef(0);
 
@@ -87,6 +95,8 @@ export default function App() {
         setRoot(status.root);
         if (status.root) {
           await Promise.all([loadTracks(""), loadAlbums()]);
+          // A write from a previous session can still be taken back.
+          refreshUndo();
           const saved = await invoke<string | null>("get_ui_state", { key: "view" });
           if (!cancelled && saved && TABS.some((tab) => tab.view === saved)) {
             setView(saved as View);
@@ -101,7 +111,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadTracks, loadAlbums]);
+  }, [loadTracks, loadAlbums, refreshUndo]);
 
   // The watcher re-indexes after a burst of filesystem changes settles.
   useEffect(() => {
@@ -260,6 +270,7 @@ export default function App() {
           tracks={tracks.filter((track) => marked.has(track.id))}
           onClose={() => setEditing(false)}
           onWritten={() => {
+            refreshUndo();
             void loadTracks(query);
             void loadAlbums();
           }}
@@ -270,6 +281,7 @@ export default function App() {
         <FilenameTags
           onClose={() => setRenaming(false)}
           onWritten={() => {
+            refreshUndo();
             void loadTracks(query);
             void loadAlbums();
           }}
@@ -386,6 +398,22 @@ export default function App() {
               <button type="button" className="chip" onClick={() => setRenaming(true)}>
                 Tags from filenames…
               </button>
+              {undoable && (
+                <button
+                  type="button"
+                  className="chip chip--quiet"
+                  title={`${undoable.description} · ${undoable.tracks} track${undoable.tracks === 1 ? "" : "s"}`}
+                  onClick={() => {
+                    void invoke("undo_last").then(() => {
+                      refreshUndo();
+                      void loadTracks(query);
+                      void loadAlbums();
+                    });
+                  }}
+                >
+                  Undo {undoable.description.toLowerCase()} ({undoable.tracks})
+                </button>
+              )}
             </div>
             <TrackTable
               tracks={tracks}

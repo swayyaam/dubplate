@@ -10,6 +10,7 @@ use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, P
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
 use dubplate_analysis::{pipeline, WaveformCache};
 use dubplate_library::tags;
+use dubplate_library::undo::{self, UndoStore};
 use dubplate_library::{
     flow, health, history, index, playlists, query, watch, AlbumRow, CollectionHealth, FlowStep,
     Library, LibraryWatcher, Listen, PlaylistRow, SyncReport, TrackRow,
@@ -45,6 +46,8 @@ struct AppState {
     library: Mutex<Library>,
     artwork: ArtworkCache,
     waveforms: WaveformCache,
+    /// Previous tag values, so a write can be taken back.
+    undo: UndoStore,
     watcher: Mutex<Option<LibraryWatcher>>,
     engine: Engine,
     /// Guards against two analysis passes running at once.
@@ -367,7 +370,7 @@ async fn write_track_tags(
         let touched_artwork = edit.artwork.is_some();
         let report = {
             let mut library = state.library.lock().map_err(to_error)?;
-            let report = tags::write(&mut library, &ids, &edit).map_err(to_error)?;
+            let report = tags::write(&mut library, &state.undo, &ids, &edit).map_err(to_error)?;
             if touched_artwork {
                 tags::invalidate_album_art(&library, &ids).map_err(to_error)?;
             }
@@ -379,6 +382,42 @@ async fn write_track_tags(
             let _ = dubplate_library::artwork::build_cache(&mut library, &state.artwork);
         }
         Ok(report)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Operations that can still be taken back, newest first.
+#[tauri::command]
+async fn undo_history(state: State<'_, Arc<AppState>>) -> Fallible<Vec<undo::Batch>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        undo::history(&library).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Put the most recent tag write back.
+///
+/// Only the most recent: reversing an older edit while a newer one still
+/// stands would leave the files in a state they were never in.
+#[tauri::command]
+async fn undo_last(state: State<'_, Arc<AppState>>) -> Fallible<Option<tags::WriteReport>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut library = state.library.lock().map_err(to_error)?;
+        let Some(batch) = undo::newest(&library).map_err(to_error)? else {
+            return Ok(None);
+        };
+        let report = tags::undo_batch(&mut library, &state.undo, batch).map_err(to_error)?;
+        // A restored cover has to reach the artwork cache too, or the old one
+        // stays on screen.
+        let ids: Vec<i64> = report.outcomes.iter().map(|outcome| outcome.id).collect();
+        let _ = tags::invalidate_album_art(&library, &ids);
+        let _ = dubplate_library::artwork::build_cache(&mut library, &state.artwork);
+        Ok(Some(report))
     })
     .await
     .map_err(to_error)?
@@ -410,7 +449,7 @@ async fn apply_filename_tags(
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let mut library = state.library.lock().map_err(to_error)?;
-        tags::apply_names(&mut library, &ids, fields).map_err(to_error)
+        tags::apply_names(&mut library, &state.undo, &ids, fields).map_err(to_error)
     })
     .await
     .map_err(to_error)?
@@ -887,6 +926,7 @@ pub fn run() {
                 library: Mutex::new(library),
                 artwork,
                 waveforms: WaveformCache::new(data_dir.join("waveforms")),
+                undo: UndoStore::new(data_dir.join("undo")),
                 watcher: Mutex::new(None),
                 engine: Engine::spawn(),
                 analysing: AtomicBool::new(false),
@@ -1030,7 +1070,9 @@ pub fn run() {
             track_tags,
             write_track_tags,
             filename_preview,
-            apply_filename_tags
+            apply_filename_tags,
+            undo_history,
+            undo_last
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

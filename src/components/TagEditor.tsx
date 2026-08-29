@@ -188,7 +188,7 @@ export function TagEditor({ tracks, onClose, onWritten }: Props) {
         <footer className="sheet__foot">
           <span className="sheet__hint">
             {dirty
-              ? `Writes to ${tracks.length} file${tracks.length === 1 ? "" : "s"}. There is no undo.`
+              ? `Writes to ${tracks.length} file${tracks.length === 1 ? "" : "s"}. Undo is available afterwards.`
               : "Nothing changed yet."}
           </span>
           <div className="sheet__actions">

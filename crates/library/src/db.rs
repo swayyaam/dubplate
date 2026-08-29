@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 /// Current schema version. Bump and add a migration arm when the schema moves.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// The library index.
 ///
@@ -54,7 +54,14 @@ impl Library {
             return Ok(());
         }
         if version == 0 {
+            // A fresh database gets the current schema in one go.
             self.conn.execute_batch(SCHEMA)?;
+        } else {
+            // An existing one is stepped forward. Each step is additive and
+            // safe to apply to a library that already has data in it.
+            if version < 2 {
+                self.conn.execute_batch(UNDO_SCHEMA)?;
+            }
         }
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -192,6 +199,55 @@ CREATE TABLE app_state (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL          -- queue, position, volume, last view
 );
+
+CREATE TABLE tag_undo_batch (
+  id          INTEGER PRIMARY KEY,
+  description TEXT NOT NULL,
+  tracks      INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE tag_undo (
+  id       INTEGER PRIMARY KEY,
+  batch    INTEGER NOT NULL REFERENCES tag_undo_batch(id) ON DELETE CASCADE,
+  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  path     TEXT NOT NULL,
+  fields   TEXT NOT NULL,
+  art_blob TEXT,
+  had_art  INTEGER NOT NULL
+);
+
+CREATE INDEX tag_undo_batch_idx ON tag_undo(batch);
+"#;
+
+/// Added in version 2, with the tag editor.
+///
+/// Kept as its own statement so a library from version 1 gains the tables
+/// without being rebuilt: an index is expensive to recreate and holds play
+/// counts and history that exist nowhere else.
+const UNDO_SCHEMA: &str = r#"
+CREATE TABLE tag_undo_batch (
+  id          INTEGER PRIMARY KEY,
+  description TEXT NOT NULL,   -- "Edit tags", "Tags from filenames"
+  tracks      INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE tag_undo (
+  id       INTEGER PRIMARY KEY,
+  batch    INTEGER NOT NULL REFERENCES tag_undo_batch(id) ON DELETE CASCADE,
+  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  path     TEXT NOT NULL,
+  -- The values these fields had before the write. A null value means the
+  -- field was absent, which undo restores by clearing it again.
+  fields   TEXT NOT NULL,
+  -- Hash of the cover the file had before, in the undo blob store. Null when
+  -- the write did not touch artwork.
+  art_blob TEXT,
+  had_art  INTEGER NOT NULL
+);
+
+CREATE INDEX tag_undo_batch_idx ON tag_undo(batch);
 "#;
 
 #[cfg(test)]
