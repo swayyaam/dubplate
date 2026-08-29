@@ -1,0 +1,19 @@
+[package]
+name        = "dubplate-audio"
+description = "Realtime audio engine for dubplate: ring buffer, output backends, decoding"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace    = true
+cpal = "0.18.2"
+rtrb = "0.4.0"
+symphonia = { version = "0.6.1", features = ["mp3", "aac", "alac", "isomp4", "aiff"] }
+thiserror.workspace = true
+tracing.workspace   = true
+
+[dev-dependencies]
+anyhow.workspace = true
+rtrb = "0.4.0"
