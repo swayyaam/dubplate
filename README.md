@@ -52,6 +52,8 @@ Working today:
   bit depth, spectral cutoff, transcode score, tempo and key
 - Collection health: what is lossless, what is padded, what looks like a
   transcode, and the distribution of formats, rates and depths
+- Tag editor: one track or many, writing to the files themselves
+- Tags from filenames, in bulk, previewed before anything is written
 - Smart playlists whose rules are stored rather than their contents
 - "Build a set that flows from this track", using tempo, key and loudness
 - Album grid, album view, now playing, queue, command palette
@@ -59,6 +61,25 @@ Working today:
 - One accent colour, sampled from the current cover
 
 Deliberately correct, because each is easy to get wrong:
+
+- **Editing many tracks must not flatten them.** A field the selection
+  disagrees on shows "multiple" and is not written; only fields actually typed
+  into are sent. Loading twelve tracks and pressing save would otherwise stamp
+  one title across all of them.
+- **Rewriting a tag must not cost the track its analysis.** A tag write changes
+  the file's first 64KB, which is what the content key hashes, so a plain
+  rescan would decide the audio had been replaced and throw away tempo, key,
+  bit depth and spectral figures. The write records the new `(mtime, size,
+  content_key)` itself, so the next scan sees a file it already knows.
+- **Writes go through a copy and a rename**, which is atomic within a
+  directory. An interrupted write leaves the old file or the new one, never
+  half of either. There is no undo, so the bulk operation previews everything
+  first.
+- **WAV and AIFF are tagged twice.** Both containers support a native text
+  chunk and an embedded ID3v2 chunk, and software disagrees about which to
+  read: Rekordbox and Serato prefer ID3v2, older tools read the native chunk.
+  Writing one and not the other means half the software that opens the file
+  sees nothing.
 
 - **A peak-only waveform of a modern master is a rectangle.** Honestly so: the
   loudest sample in any second of a brickwalled club track is the limiter

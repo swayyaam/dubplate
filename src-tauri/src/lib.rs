@@ -9,6 +9,7 @@ use dubplate_audio::engine::{
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
 use dubplate_analysis::{pipeline, WaveformCache};
+use dubplate_library::tags;
 use dubplate_library::{
     flow, health, history, index, playlists, query, watch, AlbumRow, CollectionHealth, FlowStep,
     Library, LibraryWatcher, Listen, PlaylistRow, SyncReport, TrackRow,
@@ -330,6 +331,86 @@ async fn waveform(state: State<'_, Arc<AppState>>, track_id: i64) -> Fallible<ta
                 .map_err(to_error)?;
         }
         Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// The tag values shared by a selection, for the editor to show.
+#[tauri::command]
+async fn track_tags(
+    state: State<'_, Arc<AppState>>,
+    ids: Vec<i64>,
+) -> Fallible<Vec<tags::FieldValue>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        tags::read_fields(&library, &ids).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Write an edit to the selected files.
+///
+/// Blocking, because the caller has to know whether their files changed before
+/// it can show them anything, and because a bulk edit that reported success
+/// before finishing would be lying.
+#[tauri::command]
+async fn write_track_tags(
+    state: State<'_, Arc<AppState>>,
+    ids: Vec<i64>,
+    edit: tags::TagEdit,
+) -> Fallible<tags::WriteReport> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let touched_artwork = edit.artwork.is_some();
+        let report = {
+            let mut library = state.library.lock().map_err(to_error)?;
+            let report = tags::write(&mut library, &ids, &edit).map_err(to_error)?;
+            if touched_artwork {
+                tags::invalidate_album_art(&library, &ids).map_err(to_error)?;
+            }
+            report
+        };
+        if touched_artwork {
+            // Outside the write so a slow image decode does not hold the lock.
+            let mut library = state.library.lock().map_err(to_error)?;
+            let _ = dubplate_library::artwork::build_cache(&mut library, &state.artwork);
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// What the filenames say, without writing anything.
+#[tauri::command]
+async fn filename_preview(
+    state: State<'_, Arc<AppState>>,
+    ids: Option<Vec<i64>>,
+    only_missing: bool,
+) -> Fallible<Vec<tags::NamePreview>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        tags::preview_names(&library, ids.as_deref(), only_missing).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Write filename-derived tags to the given tracks.
+#[tauri::command]
+async fn apply_filename_tags(
+    state: State<'_, Arc<AppState>>,
+    ids: Vec<i64>,
+    fields: tags::NameFields,
+) -> Fallible<tags::WriteReport> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut library = state.library.lock().map_err(to_error)?;
+        tags::apply_names(&mut library, &ids, fields).map_err(to_error)
     })
     .await
     .map_err(to_error)?
@@ -945,7 +1026,11 @@ pub fn run() {
             list_playlists,
             playlist_tracks,
             add_preset_playlists,
-            delete_playlist
+            delete_playlist,
+            track_tags,
+            write_track_tags,
+            filename_preview,
+            apply_filename_tags
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

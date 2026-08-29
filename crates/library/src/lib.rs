@@ -8,6 +8,7 @@
 
 pub mod artwork;
 pub mod db;
+pub mod filename;
 pub mod flow;
 pub mod health;
 pub mod history;
@@ -17,6 +18,7 @@ pub mod playlists;
 pub mod query;
 pub mod scan;
 pub mod smart;
+pub mod tags;
 pub mod track;
 pub mod watch;
 

@@ -949,3 +949,154 @@ button, input { font: inherit; color: inherit; }
   border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.16); }
+
+/* ── Tag editing ─────────────────────────────────────────────────────────── */
+
+/* A marked row differs from the cursor row: the cursor is where the keyboard
+   is, the mark is what an edit would apply to. Both can be visible at once. */
+.row--marked { background: rgba(255, 255, 255, 0.055); }
+.row--marked.row--selected { background: var(--accent-soft); }
+
+.tablebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px var(--gutter);
+  border-bottom: 1px solid var(--hairline);
+}
+.tablebar__count {
+  margin-right: auto;
+  font: 12px/1 var(--mono);
+  color: var(--text-faint);
+}
+
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+.sheet__panel {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: 100%;
+  overflow: hidden;
+  background: var(--bg-raised);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+.sheet__panel--wide { width: min(920px, 100%); }
+
+.sheet__head {
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+.sheet__title { margin: 0; font-size: 15px; font-weight: 600; }
+.sheet__subtitle {
+  display: block;
+  margin-top: 3px;
+  font: 12px/1.4 var(--mono);
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+.sheet__note, .sheet__error { padding: 16px 20px; margin: 0; font-size: 13px; }
+.sheet__note { color: var(--text-dim); }
+.sheet__error { color: var(--danger); }
+
+.sheet__foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--hairline);
+}
+.sheet__hint { flex: 1; font-size: 12px; color: var(--text-faint); }
+.sheet__actions { display: flex; gap: 8px; }
+
+.fields {
+  padding: 14px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.field { display: flex; align-items: center; gap: 12px; }
+.field__label {
+  width: 96px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: right;
+}
+.field__input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  font: 13px var(--sans);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+}
+.field__input:focus { outline: none; border-color: var(--accent); }
+/* A field the selection disagrees on. Italic placeholder, so it reads as a
+   state rather than as a value someone might think is about to be written. */
+.field__input--varies::placeholder { color: var(--text-faint); font-style: italic; }
+.field--pair .field__input { flex: none; width: 74px; }
+.field__of { font-size: 12px; color: var(--text-faint); }
+.field__artwork { display: flex; gap: 8px; }
+
+.chip--primary {
+  background: var(--accent);
+  color: #17140d;
+  border-color: transparent;
+  font-weight: 600;
+}
+.chip--on { background: var(--accent-soft); color: var(--accent); }
+.chip--warn { background: rgba(226, 104, 92, 0.16); color: var(--danger); }
+.chip--quiet { color: var(--text-faint); }
+.chip:disabled { opacity: 0.4; cursor: default; }
+
+.namebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--hairline);
+}
+.namebar__gap { flex: 1; }
+
+.names { overflow-y: auto; padding: 6px 0; }
+.names__row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 5px 20px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.names__row:hover { background: var(--hover); }
+.names__row--same { opacity: 0.4; cursor: default; }
+.names__file {
+  font-family: var(--mono);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.names__arrow { color: var(--text-faint); text-align: center; }
+.names__guess { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.names__artist { color: var(--accent); white-space: nowrap; }
+.names__title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.names__track, .names__aside {
+  font: 11px var(--mono);
+  color: var(--text-faint);
+  white-space: nowrap;
+}

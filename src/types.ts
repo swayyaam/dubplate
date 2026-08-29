@@ -239,3 +239,62 @@ export type View =
   | "signal"
   | "health"
   | "playlists";
+
+/** Mirrors `dubplate_library::tags::Field`. */
+export type TagField =
+  | "title"
+  | "artist"
+  | "albumArtist"
+  | "album"
+  | "trackNumber"
+  | "trackTotal"
+  | "discNumber"
+  | "discTotal"
+  | "year"
+  | "genre"
+  | "composer"
+  | "comment";
+
+export interface FieldValue {
+  field: TagField;
+  /** The shared value, or null when the selection disagrees or all are empty. */
+  value: string | null;
+  /** True when the selected tracks do not agree: shown as "multiple". */
+  varies: boolean;
+}
+
+export interface WriteOutcome {
+  id: number;
+  path: string;
+  error: string | null;
+}
+
+export interface WriteReport {
+  written: number;
+  failed: number;
+  outcomes: WriteOutcome[];
+}
+
+export interface NameGuess {
+  title: string | null;
+  artist: string | null;
+  track: number | null;
+  bpm: number | null;
+  key: string | null;
+}
+
+export interface NamePreview {
+  id: number;
+  fileName: string;
+  currentTitle: string | null;
+  currentArtist: string | null;
+  guess: NameGuess;
+  changes: boolean;
+}
+
+export interface NameFields {
+  title: boolean;
+  artist: boolean;
+  track: boolean;
+  overwrite: boolean;
+}

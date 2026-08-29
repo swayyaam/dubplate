@@ -83,15 +83,7 @@ pub fn walk(root: &Path) -> Vec<FileEntry> {
         .filter(|path| has_audio_extension(path))
         .map(|path| {
             let (size, mtime) = std::fs::metadata(&path)
-                .map(|meta| {
-                    let mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    (meta.len(), mtime)
-                })
+                .map(|meta| (meta.len(), mtime_of(&meta)))
                 .unwrap_or((0, 0));
             FileEntry { path, size, mtime }
         })
@@ -105,6 +97,19 @@ pub fn walk(root: &Path) -> Vec<FileEntry> {
 /// different files sharing a size *and* a 64KB prefix would collide, which in
 /// practice means re-tagged copies of the same audio -- acceptable, since the
 /// key is only ever used to match a vanished path against a new one.
+/// Modification time in whole Unix seconds.
+///
+/// Paired with the file size this is the incremental-scan skip key, so anything
+/// that rewrites a file has to compute it exactly this way or the next scan
+/// will decide the file changed underneath it.
+pub fn mtime_of(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 pub fn content_key(path: &Path, size: u64) -> std::io::Result<String> {
     use std::io::Read;
 

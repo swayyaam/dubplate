@@ -15,6 +15,16 @@ interface Props {
   /** The track the engine is on, so the row can show it. */
   playingId: number | null;
   isPlaying: boolean;
+  /**
+   * Track ids marked for a bulk action, if the view supports one.
+   *
+   * Separate from `selected`, which is the keyboard cursor. Editing twelve
+   * tracks at once needs a set; playing one needs a cursor; conflating them
+   * would mean arrowing through a list silently changed what an edit applies
+   * to.
+   */
+  marked?: ReadonlySet<number>;
+  onMarkedChange?: (ids: ReadonlySet<number>) => void;
 }
 
 /**
@@ -24,8 +34,19 @@ interface Props {
  * Arrow keys move the selection and pull it into view, so the list is fully
  * usable without the mouse.
  */
-export function TrackTable({ tracks, selected, onSelect, onActivate, playingId, isPlaying }: Props) {
+export function TrackTable({
+  tracks,
+  selected,
+  onSelect,
+  onActivate,
+  playingId,
+  isPlaying,
+  marked,
+  onMarkedChange,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Where a shift-click range starts. Set by every plain or toggling click.
+  const anchorRef = useRef<number>(0);
 
   const virtualizer = useVirtualizer({
     count: tracks.length,
@@ -42,6 +63,40 @@ export function TrackTable({ tracks, selected, onSelect, onActivate, playingId, 
     // virtualizer identity is stable enough; re-running on selection is the point
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, tracks.length]);
+
+  /**
+   * Click behaviour follows the platform: plain replaces, Cmd toggles one,
+   * Shift takes the range from the anchor.
+   */
+  const onRowClick = useCallback(
+    (index: number, event: React.MouseEvent) => {
+      onSelect(index);
+      if (!onMarkedChange) return;
+
+      if (event.shiftKey) {
+        const from = Math.min(anchorRef.current, index);
+        const to = Math.max(anchorRef.current, index);
+        const next = new Set<number>();
+        for (let i = from; i <= to; i += 1) next.add(tracks[i].id);
+        onMarkedChange(next);
+        return;
+      }
+
+      anchorRef.current = index;
+      const id = tracks[index].id;
+      if (event.metaKey || event.ctrlKey) {
+        const next = new Set(marked ?? []);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        onMarkedChange(next);
+        return;
+      }
+      // A plain click on an existing multi-selection clears it, which is what
+      // every list on this platform does.
+      onMarkedChange(new Set([id]));
+    },
+    [tracks, marked, onMarkedChange, onSelect],
+  );
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -78,9 +133,21 @@ export function TrackTable({ tracks, selected, onSelect, onActivate, playingId, 
           event.preventDefault();
           onActivate(selected);
           break;
+        case "a":
+          if (event.metaKey || event.ctrlKey) {
+            event.preventDefault();
+            onMarkedChange?.(new Set(tracks.map((track) => track.id)));
+          }
+          break;
+        case "Escape":
+          if (marked && marked.size > 0) {
+            event.preventDefault();
+            onMarkedChange?.(new Set());
+          }
+          break;
       }
     },
-    [tracks.length, selected, onSelect, onActivate],
+    [tracks, selected, onSelect, onActivate, marked, onMarkedChange],
   );
 
   return (
@@ -110,9 +177,10 @@ export function TrackTable({ tracks, selected, onSelect, onActivate, playingId, 
               index={item.index}
               offset={item.start}
               isSelected={item.index === selected}
+              isMarked={marked?.has(tracks[item.index].id) ?? false}
               isCurrent={tracks[item.index].id === playingId}
               isPlaying={isPlaying}
-              onSelect={onSelect}
+              onRowClick={onRowClick}
               onActivate={onActivate}
             />
           ))}
@@ -127,9 +195,10 @@ interface RowProps {
   index: number;
   offset: number;
   isSelected: boolean;
+  isMarked: boolean;
   isCurrent: boolean;
   isPlaying: boolean;
-  onSelect: (index: number) => void;
+  onRowClick: (index: number, event: React.MouseEvent) => void;
   onActivate: (index: number) => void;
 }
 
@@ -138,18 +207,19 @@ function RowImpl({
   index,
   offset,
   isSelected,
+  isMarked,
   isCurrent,
   isPlaying,
-  onSelect,
+  onRowClick,
   onActivate,
 }: RowProps) {
   return (
     <div
-      className={`row${isSelected ? " row--selected" : ""}${isCurrent ? " row--current" : ""}`}
+      className={`row${isSelected ? " row--selected" : ""}${isMarked ? " row--marked" : ""}${isCurrent ? " row--current" : ""}`}
       style={{ transform: `translateY(${offset}px)`, height: ROW_HEIGHT }}
       role="option"
       aria-selected={isSelected}
-      onClick={() => onSelect(index)}
+      onClick={(event) => onRowClick(index, event)}
       onDoubleClick={() => onActivate(index)}
       title={track.path}
     >

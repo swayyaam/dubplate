@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AlbumRow, LibraryStatus, SyncOutcome, TrackRow, View } from "./types";
 import { TrackTable } from "./components/TrackTable";
+import { TagEditor } from "./components/TagEditor";
+import { FilenameTags } from "./components/FilenameTags";
 import { Transport } from "./components/Transport";
 import { CommandPalette, type Action } from "./components/CommandPalette";
 import { AlbumsView } from "./views/AlbumsView";
@@ -41,6 +43,10 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /** Track ids marked in the table for a bulk action. */
+  const [marked, setMarked] = useState<ReadonlySet<number>>(new Set());
+  const [editing, setEditing] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const queryGeneration = useRef(0);
 
@@ -249,7 +255,28 @@ export default function App() {
     <div className="app">
       <header className="titlebar" data-tauri-drag-region>
         <span className="wordmark" data-tauri-drag-region>dubplate</span>
-        {hasLibrary && (
+        {editing && (
+        <TagEditor
+          tracks={tracks.filter((track) => marked.has(track.id))}
+          onClose={() => setEditing(false)}
+          onWritten={() => {
+            void loadTracks(query);
+            void loadAlbums();
+          }}
+        />
+      )}
+
+      {renaming && (
+        <FilenameTags
+          onClose={() => setRenaming(false)}
+          onWritten={() => {
+            void loadTracks(query);
+            void loadAlbums();
+          }}
+        />
+      )}
+
+      {hasLibrary && (
           <nav className="tabs">
             {TABS.map((tab) => (
               <button
@@ -341,14 +368,36 @@ export default function App() {
         )}
 
         {hasLibrary && view === "tracks" && tracks.length > 0 && (
-          <TrackTable
-            tracks={tracks}
-            selected={selected}
-            onSelect={setSelected}
-            onActivate={(index) => playFrom(tracks, index)}
-            playingId={playingId}
-            isPlaying={isPlaying}
-          />
+          <>
+            <div className="tablebar">
+              <span className="tablebar__count">
+                {marked.size > 0
+                  ? `${marked.size} selected`
+                  : `${tracks.length} track${tracks.length === 1 ? "" : "s"}`}
+              </span>
+              <button
+                type="button"
+                className="chip"
+                disabled={marked.size === 0}
+                onClick={() => setEditing(true)}
+              >
+                Edit tags
+              </button>
+              <button type="button" className="chip" onClick={() => setRenaming(true)}>
+                Tags from filenames…
+              </button>
+            </div>
+            <TrackTable
+              tracks={tracks}
+              selected={selected}
+              onSelect={setSelected}
+              onActivate={(index) => playFrom(tracks, index)}
+              playingId={playingId}
+              isPlaying={isPlaying}
+              marked={marked}
+              onMarkedChange={setMarked}
+            />
+          </>
         )}
 
         {hasLibrary && view === "tracks" && tracks.length === 0 && (
