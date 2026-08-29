@@ -94,3 +94,45 @@ impl TrackRow {
         })
     }
 }
+
+/// An album as the art grid sees it: enough to draw a tile without a second
+/// query per cover.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumRow {
+    pub id: i64,
+    pub title: String,
+    pub artist: Option<String>,
+    pub year: Option<u32>,
+    /// Key into the artwork cache. Empty string means "checked, no art found".
+    pub art_hash: Option<String>,
+    pub track_count: i64,
+    pub duration_ms: i64,
+    /// One badge for the whole album when every track agrees, e.g. "FLAC 24/96".
+    /// `None` when the album is a mix of formats, which is worth seeing.
+    pub codec: Option<String>,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub lossless: bool,
+}
+
+impl AlbumRow {
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let art_hash: Option<String> = row.get(4)?;
+        Ok(Self {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            artist: row.get(2)?,
+            year: row.get(3)?,
+            // The empty-string sentinel means "looked, found nothing"; the UI
+            // only cares whether there is a cover to draw.
+            art_hash: art_hash.filter(|hash| !hash.is_empty()),
+            track_count: row.get(5)?,
+            duration_ms: row.get(6)?,
+            codec: row.get(7)?,
+            sample_rate: row.get(8)?,
+            bit_depth: row.get(9)?,
+            lossless: row.get::<_, Option<i64>>(10)?.unwrap_or(1) == 0,
+        })
+    }
+}

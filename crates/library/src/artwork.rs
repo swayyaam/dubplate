@@ -263,3 +263,105 @@ fn sibling_art(source: &Path) -> Option<Vec<u8>> {
 fn hash_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..32].to_string()
 }
+
+/// Pull a usable accent colour out of a cover.
+///
+/// "One accent colour, sampled from the current album art" is the whole visual
+/// idea, so the result has to be usable rather than merely accurate: a muddy
+/// average of an entire sleeve is grey, and grey is not an accent. Pixels are
+/// weighted by how colourful they are, near-black and near-white are ignored
+/// entirely, and the winning hue is re-lit to sit legibly on a near-black page.
+///
+/// Reads the 64px variant, which is already in the cache and is plenty: a
+/// dominant hue does not need resolution.
+pub fn accent(cache: &ArtworkCache, hash: &str) -> Option<String> {
+    if hash.is_empty() {
+        return None;
+    }
+    let image = image::open(cache.variant_path(hash, VARIANTS[0])).ok()?;
+    let rgb = image.to_rgb8();
+
+    // 24 hue buckets: fine enough to separate red from orange, coarse enough
+    // that noise in a photograph does not split a colour across two buckets.
+    const BUCKETS: usize = 24;
+    let mut weights = [0.0f64; BUCKETS];
+    let mut sums = [[0.0f64; 3]; BUCKETS];
+
+    for pixel in rgb.pixels() {
+        let (r, g, b) = (pixel[0] as f64, pixel[1] as f64, pixel[2] as f64);
+        let (hue, saturation, lightness) = to_hsl(r, g, b);
+        // Ignore the parts of a sleeve that carry no colour: black borders,
+        // white text, and the grey in between.
+        if saturation < 0.15 || !(0.08..0.94).contains(&lightness) {
+            continue;
+        }
+        // Colourful, mid-lit pixels count for more than pale or dark ones.
+        let weight = saturation * (1.0 - (lightness - 0.5).abs() * 1.2);
+        let bucket = ((hue / 360.0) * BUCKETS as f64) as usize % BUCKETS;
+        weights[bucket] += weight;
+        sums[bucket][0] += r * weight;
+        sums[bucket][1] += g * weight;
+        sums[bucket][2] += b * weight;
+    }
+
+    let (best, weight) = weights
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    if *weight <= f64::EPSILON {
+        // A greyscale sleeve genuinely has no accent to offer.
+        return None;
+    }
+
+    let mean = [
+        sums[best][0] / weight,
+        sums[best][1] / weight,
+        sums[best][2] / weight,
+    ];
+    let (hue, saturation, _) = to_hsl(mean[0], mean[1], mean[2]);
+
+    // Re-light it. Whatever the sleeve's own lightness was, the accent has to
+    // read against near-black and stay legible as small text.
+    let (r, g, b) = from_hsl(hue, saturation.clamp(0.45, 0.85), 0.62);
+    Some(format!("#{:02x}{:02x}{:02x}", r, g, b))
+}
+
+fn to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let (r, g, b) = (r / 255.0, g / 255.0, b / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let lightness = (max + min) / 2.0;
+    let delta = max - min;
+
+    if delta.abs() < f64::EPSILON {
+        return (0.0, 0.0, lightness);
+    }
+    let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs()).max(f64::EPSILON);
+    let hue = if (max - r).abs() < f64::EPSILON {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if (max - g).abs() < f64::EPSILON {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    ((hue + 360.0) % 360.0, saturation.clamp(0.0, 1.0), lightness)
+}
+
+fn from_hsl(hue: f64, saturation: f64, lightness: f64) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let x = c * (1.0 - (((hue / 60.0) % 2.0) - 1.0).abs());
+    let m = lightness - c / 2.0;
+    let (r, g, b) = match hue as u32 / 60 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}

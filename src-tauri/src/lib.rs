@@ -6,7 +6,7 @@ use dubplate_audio::engine::{Command, Engine, PlayEvent, PlayerState, QueueItem,
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
 use dubplate_library::{
-    history, index, query, watch, Library, LibraryWatcher, Listen, SyncReport, TrackRow,
+    history, index, query, watch, AlbumRow, Library, LibraryWatcher, Listen, SyncReport, TrackRow,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -16,6 +16,11 @@ const ROOT_KEY: &str = "library_root";
 /// Queue, current track, position and volume, so a relaunch resumes where the
 /// last session stopped.
 const PLAYBACK_KEY: &str = "playback";
+/// The view the user was last on, so relaunching lands where they left off.
+const VIEW_KEY: &str = "last_view";
+/// Buckets in a waveform. Enough detail for a full-width seek bar, small enough
+/// to send over IPC without thinking about it.
+const WAVEFORM_BUCKETS: usize = 1000;
 /// How often playback state is written back. Often enough that a crash loses
 /// seconds, rarely enough that it is not writing during every frame.
 const SAVE_INTERVAL: Duration = Duration::from_secs(3);
@@ -206,6 +211,83 @@ fn set_shuffle(state: State<'_, Arc<AppState>>, shuffle: bool) {
     state.engine.send(Command::SetShuffle(shuffle));
 }
 
+#[tauri::command]
+async fn list_albums(state: State<'_, Arc<AppState>>) -> Fallible<Vec<AlbumRow>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        query::list_albums(&library).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+async fn album_tracks(state: State<'_, Arc<AppState>>, album_id: i64) -> Fallible<Vec<TrackRow>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        query::album_tracks(&library, album_id).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// The accent colour for a cover, so the interface can take its one colour from
+/// whatever is playing.
+#[tauri::command]
+async fn accent_color(state: State<'_, Arc<AppState>>, hash: String) -> Fallible<Option<String>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(dubplate_library::artwork::accent(&state.artwork, &hash))
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Peaks for the seek bar. One decode pass, roughly a tenth of a second.
+#[tauri::command]
+async fn waveform(state: State<'_, Arc<AppState>>, track_id: i64) -> Fallible<Vec<f32>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let path: String = {
+            let library = state.library.lock().map_err(to_error)?;
+            library
+                .connection()
+                .query_row("SELECT path FROM tracks WHERE id = ?1", [track_id], |row| {
+                    row.get(0)
+                })
+                .map_err(to_error)?
+        };
+        dubplate_audio::peaks::compute(std::path::Path::new(&path), WAVEFORM_BUCKETS)
+            .map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Small key/value store for interface state, so a relaunch is not a reset.
+#[tauri::command]
+fn get_ui_state(state: State<'_, Arc<AppState>>, key: String) -> Fallible<Option<String>> {
+    let library = state.library.lock().map_err(to_error)?;
+    library.get_state(&ui_key(&key)).map_err(to_error)
+}
+
+#[tauri::command]
+fn set_ui_state(state: State<'_, Arc<AppState>>, key: String, value: String) -> Fallible<()> {
+    let library = state.library.lock().map_err(to_error)?;
+    library.set_state(&ui_key(&key), &value).map_err(to_error)
+}
+
+/// Namespaced so interface preferences cannot collide with engine state.
+fn ui_key(key: &str) -> String {
+    if key == "view" {
+        VIEW_KEY.to_string()
+    } else {
+        format!("ui.{key}")
+    }
+}
+
 /// Bank what was actually listened to.
 ///
 /// Play counts live in the database rather than in tags, so nothing dubplate
@@ -311,6 +393,37 @@ fn start_watching(app: AppHandle, state: Arc<AppState>, root: PathBuf) -> Fallib
     Ok(())
 }
 
+/// Resolve `art://localhost/<hash>/<width>` to a file in the artwork cache.
+///
+/// The hash and width are validated rather than pasted into a path: this handler
+/// reads whatever it is asked for, so it must only ever be asked for cache
+/// entries.
+fn serve_artwork<R: tauri::Runtime>(app: &AppHandle<R>, path: &str) -> Option<Vec<u8>> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    let hash = parts.next()?;
+    let width: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if hash.is_empty()
+        || hash.len() > 64
+        || !hash.chars().all(|c| c.is_ascii_hexdigit())
+        || !dubplate_library::artwork::VARIANTS.contains(&width)
+    {
+        return None;
+    }
+
+    let cache = dubplate_library::ArtworkCache::new(app.path().app_data_dir().ok()?.join("artwork"));
+    std::fs::read(cache.variant_path(hash, width)).ok()
+}
+
+fn empty_response() -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(404)
+        .body(Vec::new())
+        .expect("a 404 with an empty body is always constructible")
+}
+
 fn save_playback(state: &Arc<AppState>) {
     let snapshot = state.engine.snapshot();
     // Nothing worth restoring, and writing an empty queue would throw away what
@@ -377,6 +490,20 @@ fn restore_playback(state: &Arc<AppState>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Covers are served straight off disk rather than base64'd through IPC:
+        // an art grid asks for hundreds at once, and the cache already holds
+        // them at exactly the size being drawn.
+        .register_uri_scheme_protocol("art", |ctx, request| {
+            match serve_artwork(ctx.app_handle(), request.uri().path()) {
+                Some(bytes) => tauri::http::Response::builder()
+                    .header("Content-Type", "image/webp")
+                    // Content-addressed, so it can never go stale.
+                    .header("Cache-Control", "public, max-age=31536000, immutable")
+                    .body(bytes)
+                    .unwrap_or_else(|_| empty_response()),
+                None => empty_response(),
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -505,7 +632,13 @@ pub fn run() {
             seek,
             set_volume,
             set_repeat,
-            set_shuffle
+            set_shuffle,
+            list_albums,
+            album_tracks,
+            accent_color,
+            waveform,
+            get_ui_state,
+            set_ui_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

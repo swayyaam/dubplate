@@ -2,32 +2,47 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { LibraryStatus, SyncOutcome, TrackRow } from "./types";
+import type { AlbumRow, LibraryStatus, SyncOutcome, TrackRow, View } from "./types";
 import { TrackTable } from "./components/TrackTable";
 import { Transport } from "./components/Transport";
+import { CommandPalette, type Action } from "./components/CommandPalette";
+import { AlbumsView } from "./views/AlbumsView";
+import { AlbumView } from "./views/AlbumView";
+import { NowPlayingView } from "./views/NowPlayingView";
+import { QueueView } from "./views/QueueView";
 import { formatBytes, formatTotalTime } from "./lib/format";
+import { usePlayerValue } from "./lib/playerStore";
 
-/** Search returns the best matches, not every match; the list is ranked. */
 const SEARCH_LIMIT = 2000;
+const DEFAULT_ACCENT = "#e8a33d";
+
+const TABS: { view: View; label: string }[] = [
+  { view: "albums", label: "Albums" },
+  { view: "tracks", label: "Tracks" },
+  { view: "playing", label: "Playing" },
+  { view: "queue", label: "Queue" },
+];
 
 export default function App() {
   const [root, setRoot] = useState<string | null>(null);
+  const [view, setView] = useState<View>("albums");
+  const [album, setAlbum] = useState<AlbumRow | null>(null);
   const [tracks, setTracks] = useState<TrackRow[]>([]);
+  const [albums, setAlbums] = useState<AlbumRow[]>([]);
   const [outcome, setOutcome] = useState<SyncOutcome | null>(null);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
-  const [nowPlaying, setNowPlaying] = useState<{ id: number | null; playing: boolean }>({
-    id: null,
-    playing: false,
-  });
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
-
-  // Search runs per keystroke. Responses can land out of order, so only the
-  // newest request is allowed to write to state.
   const queryGeneration = useRef(0);
+
+  const playingId = usePlayerValue((state) => state?.trackId ?? null);
+  const isPlaying = usePlayerValue((state) => state?.playing ?? false);
+
+  const trackById = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
 
   const loadTracks = useCallback(async (text: string) => {
     const generation = ++queryGeneration.current;
@@ -41,8 +56,17 @@ export default function App() {
     }
   }, []);
 
-  // Resume the folder from the last session. The index is already on disk, so
-  // this is a read, not a rescan.
+  const loadAlbums = useCallback(async () => {
+    setAlbums(await invoke<AlbumRow[]>("list_albums").catch(() => []));
+  }, []);
+
+  const goTo = useCallback((next: View) => {
+    setView(next);
+    if (next !== "album") setAlbum(null);
+    void invoke("set_ui_state", { key: "view", value: next }).catch(() => {});
+  }, []);
+
+  // Resume the folder and the view from the last session.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -50,7 +74,13 @@ export default function App() {
         const status = await invoke<LibraryStatus>("library_status");
         if (cancelled) return;
         setRoot(status.root);
-        if (status.root) await loadTracks("");
+        if (status.root) {
+          await Promise.all([loadTracks(""), loadAlbums()]);
+          const saved = await invoke<string | null>("get_ui_state", { key: "view" });
+          if (!cancelled && saved && TABS.some((tab) => tab.view === saved)) {
+            setView(saved as View);
+          }
+        }
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
@@ -60,20 +90,42 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadTracks]);
+  }, [loadTracks, loadAlbums]);
 
-  // The watcher re-indexes after any burst of filesystem changes settles.
+  // The watcher re-indexes after a burst of filesystem changes settles.
   useEffect(() => {
     const synced = listen<SyncOutcome>("library:synced", (event) => {
       setOutcome(event.payload);
       void loadTracks(searchRef.current?.value ?? "");
+      void loadAlbums();
     });
     const failed = listen<string>("library:error", (event) => setError(event.payload));
     return () => {
       void synced.then((un) => un());
       void failed.then((un) => un());
     };
-  }, [loadTracks]);
+  }, [loadTracks, loadAlbums]);
+
+  // One accent colour, taken from whatever is playing. The whole palette turns
+  // with the record rather than staying a fixed brand colour.
+  useEffect(() => {
+    const hash = playingId !== null ? trackById.get(playingId)?.artHash : null;
+    if (!hash) {
+      document.documentElement.style.setProperty("--accent", DEFAULT_ACCENT);
+      return;
+    }
+    let live = true;
+    void invoke<string | null>("accent_color", { hash })
+      .then((colour) => {
+        if (live) {
+          document.documentElement.style.setProperty("--accent", colour ?? DEFAULT_ACCENT);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [playingId, trackById]);
 
   const chooseFolder = useCallback(async () => {
     const picked = await open({ directory: true, multiple: false, title: "Choose your music folder" });
@@ -81,86 +133,119 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const result = await invoke<SyncOutcome>("open_library", { path: picked });
+      setOutcome(await invoke<SyncOutcome>("open_library", { path: picked }));
       setRoot(picked);
-      setOutcome(result);
       setQuery("");
-      await loadTracks("");
+      await Promise.all([loadTracks(""), loadAlbums()]);
     } catch (err) {
       setError(String(err));
     } finally {
       setBusy(false);
     }
-  }, [loadTracks]);
+  }, [loadTracks, loadAlbums]);
 
   const rescan = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
       setOutcome(await invoke<SyncOutcome>("rescan"));
-      await loadTracks(query);
+      await Promise.all([loadTracks(query), loadAlbums()]);
     } catch (err) {
       setError(String(err));
     } finally {
       setBusy(false);
     }
-  }, [loadTracks, query]);
+  }, [loadTracks, loadAlbums, query]);
 
-  // "/" or Cmd+F jumps to search from anywhere.
+  const playFrom = useCallback((rows: TrackRow[], index: number) => {
+    const ids = rows.map((track) => track.id);
+    if (ids.length === 0) return;
+    void invoke("play_tracks", { trackIds: ids, start: index }).catch((err) =>
+      setError(String(err)),
+    );
+  }, []);
+
+  const actions = useMemo<Action[]>(
+    () => [
+      { id: "play", label: isPlaying ? "Pause" : "Play", hint: "Space", run: () => void invoke("toggle_play") },
+      { id: "next", label: "Next track", run: () => void invoke("next_track") },
+      { id: "prev", label: "Previous track", run: () => void invoke("previous_track") },
+      { id: "shuffle", label: "Toggle shuffle", run: () => void invoke("set_shuffle", { shuffle: true }) },
+      ...TABS.map((tab) => ({
+        id: `go-${tab.view}`,
+        label: `Go to ${tab.label}`,
+        run: () => goTo(tab.view),
+      })),
+      { id: "rescan", label: "Rescan library", run: () => void rescan() },
+      { id: "folder", label: "Change music folder", run: () => void chooseFolder() },
+    ],
+    [isPlaying, goTo, rescan, chooseFolder],
+  );
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const typingInField = document.activeElement?.tagName === "INPUT";
-      if ((event.key === "/" && !typingInField) || (event.key === "f" && event.metaKey)) {
+      const typing =
+        document.activeElement?.tagName === "INPUT" ||
+        document.activeElement?.tagName === "TEXTAREA";
+
+      if (event.key === "k" && event.metaKey) {
         event.preventDefault();
-        searchRef.current?.focus();
-        searchRef.current?.select();
+        setPaletteOpen((open) => !open);
+        return;
       }
-      if (event.key === "Escape" && typingInField) searchRef.current?.blur();
-      // Space is the universal play/pause, except while typing into a field.
-      if (event.key === " " && !typingInField) {
+      if (paletteOpen) return;
+      if ((event.key === "/" && !typing) || (event.key === "f" && event.metaKey)) {
+        event.preventDefault();
+        goTo("tracks");
+        requestAnimationFrame(() => {
+          searchRef.current?.focus();
+          searchRef.current?.select();
+        });
+      }
+      if (event.key === "Escape" && typing) (document.activeElement as HTMLElement).blur();
+      if (event.key === " " && !typing) {
         event.preventDefault();
         void invoke("toggle_play");
+      }
+      // Cmd+1..4 for the views, the way every other Mac app does it.
+      if (event.metaKey && /^[1-4]$/.test(event.key)) {
+        event.preventDefault();
+        goTo(TABS[Number(event.key) - 1].view);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [paletteOpen, goTo]);
 
   const stats = useMemo(() => summarise(tracks), [tracks]);
   const hasLibrary = root !== null;
-
-  // The transport names the playing track without another round trip.
-  const trackById = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
-
-  // Playing from a row queues everything currently listed, so a filtered view
-  // plays as the playlist it looks like.
-  const activate = useCallback(
-    (index: number) => {
-      const ids = tracks.map((track) => track.id);
-      if (ids.length === 0) return;
-      void invoke("play_tracks", { trackIds: ids, start: index }).catch((err) =>
-        setError(String(err)),
-      );
-    },
-    [tracks],
-  );
-
-  const onNowPlayingChange = useCallback((id: number | null, playing: boolean) => {
-    setNowPlaying({ id, playing });
-  }, []);
 
   return (
     <div className="app">
       <header className="titlebar" data-tauri-drag-region>
         <span className="wordmark" data-tauri-drag-region>dubplate</span>
-        {root && (
-          <span className="titlebar__path" data-tauri-drag-region title={root}>
-            {homeRelative(root)}
-          </span>
+        {hasLibrary && (
+          <nav className="tabs">
+            {TABS.map((tab) => (
+              <button
+                key={tab.view}
+                className={`tab${view === tab.view || (view === "album" && tab.view === "albums") ? " tab--on" : ""}`}
+                onClick={() => goTo(tab.view)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+        )}
+        <span className="titlebar__spacer" data-tauri-drag-region />
+        {hasLibrary && (
+          <button className="hintkey" onClick={() => setPaletteOpen(true)} title="Command palette">
+            ⌘K
+          </button>
         )}
       </header>
 
-      {hasLibrary && (
+      {hasLibrary && view === "tracks" && (
         <div className="toolbar">
           <input
             ref={searchRef}
@@ -202,29 +287,54 @@ export default function App() {
           </div>
         )}
 
-        {hasLibrary && tracks.length > 0 && (
+        {hasLibrary && view === "albums" && (
+          albums.length > 0 ? (
+            <AlbumsView
+              albums={albums}
+              onOpen={(picked) => {
+                setAlbum(picked);
+                setView("album");
+              }}
+            />
+          ) : (
+            <div className="empty">
+              <p className="empty__body">
+                No albums yet. Untagged files still show under Tracks.
+              </p>
+            </div>
+          )
+        )}
+
+        {hasLibrary && view === "album" && album && (
+          <AlbumView album={album} onPlay={playFrom} onBack={() => goTo("albums")} />
+        )}
+
+        {hasLibrary && view === "tracks" && tracks.length > 0 && (
           <TrackTable
             tracks={tracks}
             selected={selected}
             onSelect={setSelected}
-            onActivate={activate}
-            playingId={nowPlaying.id}
-            isPlaying={nowPlaying.playing}
+            onActivate={(index) => playFrom(tracks, index)}
+            playingId={playingId}
+            isPlaying={isPlaying}
           />
         )}
 
-        {hasLibrary && tracks.length === 0 && (
+        {hasLibrary && view === "tracks" && tracks.length === 0 && (
           <div className="empty">
             <p className="empty__body">
               {query ? `Nothing matches “${query}”.` : "No audio files in that folder."}
             </p>
           </div>
         )}
+
+        {hasLibrary && view === "playing" && <NowPlayingView trackById={trackById} />}
+        {hasLibrary && view === "queue" && <QueueView trackById={trackById} />}
       </main>
 
-      {hasLibrary && <Transport trackById={trackById} onNowPlayingChange={onNowPlayingChange} />}
+      {hasLibrary && <Transport trackById={trackById} onOpenNowPlaying={() => goTo("playing")} />}
 
-      {hasLibrary && (
+      {hasLibrary && view === "tracks" && (
         <footer className="statusbar">
           <span>{stats.count.toLocaleString()} tracks</span>
           <span className="dot" />
@@ -239,11 +349,17 @@ export default function App() {
           {outcome && <SyncSummary outcome={outcome} />}
         </footer>
       )}
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        actions={actions}
+        onPlayTrack={(track) => playFrom([track], 0)}
+      />
     </div>
   );
 }
 
-/** What the last index pass actually did, rather than just how long it took. */
 function SyncSummary({ outcome }: { outcome: SyncOutcome }) {
   const { sync, artwork } = outcome;
   const parts: string[] = [];
@@ -273,11 +389,6 @@ function SyncSummary({ outcome }: { outcome: SyncOutcome }) {
       </span>
     </>
   );
-}
-
-/** /Users/someone/Music -> ~/Music. macOS only, which is what this targets. */
-function homeRelative(path: string): string {
-  return path.replace(/^\/Users\/[^/]+/, "~");
 }
 
 function summarise(tracks: TrackRow[]) {

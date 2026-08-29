@@ -100,3 +100,21 @@ export interface PlayerState {
   underruns: number;
   error: string | null;
 }
+
+export interface AlbumRow {
+  id: number;
+  title: string;
+  artist: string | null;
+  year: number | null;
+  /** Key into the artwork cache, or null when the album has no cover. */
+  artHash: string | null;
+  trackCount: number;
+  durationMs: number;
+  /** Null when the album is a mix of formats, which is worth seeing. */
+  codec: string | null;
+  sampleRate: number | null;
+  bitDepth: number | null;
+  lossless: boolean;
+}
+
+export type View = "albums" | "tracks" | "album" | "playing" | "queue";

@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::params;
 
 use crate::db::Library;
-use crate::model::{TrackRow, TRACK_COLUMNS, TRACK_JOINS};
+use crate::model::{AlbumRow, TrackRow, TRACK_COLUMNS, TRACK_JOINS};
 
 /// Album order, the way a tracklist is meant to read. Untagged rows sort last
 /// within their group rather than first, which is where SQLite would put NULLs.
@@ -20,6 +20,51 @@ pub fn list_tracks(library: &Library) -> Result<Vec<TrackRow>> {
     let conn = library.connection();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], TrackRow::from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Every album, newest additions first, with a summary of what is in it.
+///
+/// The format columns use `MIN(x) = MAX(x)` to collapse to a single value only
+/// when every track agrees. An album that is half FLAC and half MP3 gets no
+/// badge, which is more honest than picking one.
+pub fn list_albums(library: &Library) -> Result<Vec<AlbumRow>> {
+    let conn = library.connection();
+    let mut stmt = conn.prepare(
+        "SELECT al.id,
+                al.title,
+                aa.name,
+                al.year,
+                al.art_hash,
+                COUNT(t.id),
+                COALESCE(SUM(t.duration_ms), 0),
+                CASE WHEN MIN(t.codec) = MAX(t.codec) THEN MIN(t.codec) END,
+                CASE WHEN MIN(t.sample_rate) = MAX(t.sample_rate) THEN MIN(t.sample_rate) END,
+                CASE WHEN MIN(t.bit_depth) = MAX(t.bit_depth) THEN MIN(t.bit_depth) END,
+                CASE WHEN MIN(t.is_lossy) = MAX(t.is_lossy) THEN MIN(t.is_lossy) END
+         FROM albums al
+         JOIN tracks t ON t.album_id = al.id
+         LEFT JOIN artists aa ON aa.id = al.album_artist_id
+         GROUP BY al.id
+         ORDER BY COALESCE(aa.name, '\u{ffff}') COLLATE NOCASE,
+                  al.year,
+                  al.title COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map([], AlbumRow::from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// One album's tracklist, in disc and track order.
+pub fn album_tracks(library: &Library, album_id: i64) -> Result<Vec<TrackRow>> {
+    let sql = format!(
+        "SELECT {TRACK_COLUMNS} {TRACK_JOINS}
+         WHERE t.album_id = ?1
+         ORDER BY COALESCE(t.disc_no, 1), COALESCE(t.track_no, 2147483647),
+                  COALESCE(t.title, t.path) COLLATE NOCASE"
+    );
+    let conn = library.connection();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![album_id], TrackRow::from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

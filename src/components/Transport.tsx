@@ -1,73 +1,59 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { PlayerState, RepeatMode, TrackRow } from "../types";
-import { formatDuration, trackArtist, trackTitle } from "../lib/format";
-
-/**
- * Position is polled rather than pushed, at 30fps, straight from the audio
- * callback's frame counter. Never from the decoder: it runs ahead by whatever
- * the ring buffer holds, so asking it where playback is would be wrong by about
- * 150ms.
- *
- * This component is deliberately the only thing that re-renders on a tick. The
- * track list must not: it holds ten thousand rows.
- */
-const POLL_MS = 1000 / 30;
+import { formatDuration, formatKhz, trackArtist, trackTitle } from "../lib/format";
+import { usePlayer } from "../lib/playerStore";
+import { loadWaveform, peekWaveform } from "../lib/waveforms";
+import { Cover } from "./Cover";
+import { Waveform } from "./Waveform";
 
 interface Props {
-  /** Looked up so the bar can name the track without another round trip. */
   trackById: Map<number, TrackRow>;
-  onNowPlayingChange: (trackId: number | null, playing: boolean) => void;
+  onOpenNowPlaying: () => void;
 }
 
-export const Transport = memo(function Transport({ trackById, onNowPlayingChange }: Props) {
-  const [state, setState] = useState<PlayerState | null>(null);
-  const [scrubMs, setScrubMs] = useState<number | null>(null);
-  const lastNowPlaying = useRef<string>("");
+/**
+ * Always-visible transport. Reads position from the shared store, which polls
+ * the audio callback's frame counter at 30fps -- never the decoder, which runs
+ * ahead by whatever the ring holds.
+ */
+export const Transport = memo(function Transport({ trackById, onOpenNowPlaying }: Props) {
+  const state = usePlayer();
+  const trackId = state?.trackId ?? null;
+  const [peaks, setPeaks] = useState<number[] | null>(null);
+  const [scrub, setScrub] = useState<number | null>(null);
 
   useEffect(() => {
+    if (trackId === null) {
+      setPeaks(null);
+      return;
+    }
+    setPeaks(peekWaveform(trackId));
     let live = true;
-    let timer: number;
-    const tick = async () => {
-      try {
-        const next = await invoke<PlayerState>("player_state");
-        if (!live) return;
-        setState(next);
-        // Only wake the rest of the app when the answer actually changed.
-        const key = `${next.trackId}:${next.playing}`;
-        if (key !== lastNowPlaying.current) {
-          lastNowPlaying.current = key;
-          onNowPlayingChange(next.trackId, next.playing);
-        }
-      } catch {
-        // The engine is not up yet; the next tick will find it.
-      }
-      if (live) timer = window.setTimeout(tick, POLL_MS);
-    };
-    void tick();
+    void loadWaveform(trackId).then((result) => {
+      if (live) setPeaks(result);
+    });
     return () => {
       live = false;
-      window.clearTimeout(timer);
     };
-  }, [onNowPlayingChange]);
+  }, [trackId]);
 
-  const seekTo = useCallback((ms: number) => {
-    void invoke("seek", { ms: Math.max(0, Math.round(ms)) });
-  }, []);
+  if (!state || trackId === null) return null;
 
-  if (!state || state.trackId === null) return null;
-
-  const track = trackById.get(state.trackId);
-  const position = scrubMs ?? state.positionMs;
+  const track = trackById.get(trackId);
   const duration = state.durationMs || 1;
+  const position = scrub !== null ? scrub * duration : state.positionMs;
   const progress = Math.min(1, position / duration);
 
   return (
     <div className="transport">
-      <div className="transport__now">
-        <span className="transport__title">{track ? trackTitle(track) : "—"}</span>
-        <span className="transport__artist">{track ? trackArtist(track) : ""}</span>
-      </div>
+      <button className="transport__now" onClick={onOpenNowPlaying} title="Now playing">
+        <Cover hash={track?.artHash ?? null} size={64} alt="" className="cover--chip" />
+        <span className="transport__text">
+          <span className="transport__title">{track ? trackTitle(track) : "—"}</span>
+          <span className="transport__artist">{track ? trackArtist(track) : ""}</span>
+        </span>
+      </button>
 
       <div className="transport__controls">
         <button className="icon" title="Previous" onClick={() => void invoke("previous_track")}>
@@ -87,14 +73,17 @@ export const Transport = memo(function Transport({ trackById, onNowPlayingChange
 
       <div className="transport__seek">
         <span className="transport__time">{formatDuration(position)}</span>
-        <Scrubber
-          progress={progress}
-          onScrub={(fraction) => setScrubMs(fraction * duration)}
-          onCommit={(fraction) => {
-            seekTo(fraction * duration);
-            setScrubMs(null);
-          }}
-        />
+        <div className="transport__wave">
+          <Waveform
+            peaks={peaks}
+            progress={progress}
+            height={30}
+            onScrub={setScrub}
+            onSeek={(fraction) =>
+              void invoke("seek", { ms: Math.round(fraction * duration) })
+            }
+          />
+        </div>
         <span className="transport__time">{formatDuration(state.durationMs)}</span>
       </div>
 
@@ -155,14 +144,13 @@ function SignalChip({ state }: { state: PlayerState }) {
   const converted =
     state.deviceSampleRate !== null && state.deviceSampleRate !== source.sampleRate;
   const spec = source.bitsPerSample
-    ? `${source.bitsPerSample}/${source.sampleRate / 1000}`
-    : `${source.sampleRate / 1000}`;
+    ? `${source.bitsPerSample}/${formatKhz(source.sampleRate)}`
+    : formatKhz(source.sampleRate);
   const detail = [
     `${source.codec.toUpperCase()} ${source.sampleRate} Hz`,
     source.bitsPerSample ? `${source.bitsPerSample} bit` : "no bit depth (lossy codec)",
     state.device ?? "unknown device",
     state.deviceSampleRate ? `device at ${state.deviceSampleRate} Hz` : "",
-    state.underruns > 0 ? `${state.underruns} underruns` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -171,41 +159,6 @@ function SignalChip({ state }: { state: PlayerState }) {
     <span className={`chip${converted ? " chip--converted" : ""}`} title={detail}>
       {source.codec.toUpperCase()} <span className="chip__spec">{spec}</span>
     </span>
-  );
-}
-
-function Scrubber({
-  progress,
-  onScrub,
-  onCommit,
-}: {
-  progress: number;
-  onScrub: (fraction: number) => void;
-  onCommit: (fraction: number) => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const fractionAt = (clientX: number) => {
-    const box = ref.current?.getBoundingClientRect();
-    if (!box || box.width === 0) return 0;
-    return Math.min(1, Math.max(0, (clientX - box.left) / box.width));
-  };
-
-  return (
-    <div
-      ref={ref}
-      className="scrubber"
-      onPointerDown={(event) => {
-        event.currentTarget.setPointerCapture(event.pointerId);
-        onScrub(fractionAt(event.clientX));
-      }}
-      onPointerMove={(event) => {
-        if (event.buttons === 1) onScrub(fractionAt(event.clientX));
-      }}
-      onPointerUp={(event) => onCommit(fractionAt(event.clientX))}
-    >
-      <div className="scrubber__fill" style={{ width: `${progress * 100}%` }} />
-      <div className="scrubber__head" style={{ left: `${progress * 100}%` }} />
-    </div>
   );
 }
 

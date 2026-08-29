@@ -119,3 +119,48 @@ fn walkdir_count(root: &std::path::Path) -> usize {
     }
     count
 }
+
+#[test]
+fn a_cover_yields_an_accent_that_reads_on_near_black() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+    write_wav_seeded(&dir.path().join("01.wav"), 44_100, 16, 2, 44_100, 1);
+
+    // A strongly blue sleeve.
+    let mut buffer = image::RgbImage::new(120, 120);
+    for pixel in buffer.pixels_mut() {
+        *pixel = image::Rgb([20, 60, 200]);
+    }
+    buffer.save(dir.path().join("cover.png")).unwrap();
+
+    let cache = ArtworkCache::new(cache_dir.path());
+    let hash = artwork::ingest(&cache, &dir.path().join("01.wav")).unwrap().unwrap();
+    let accent = artwork::accent(&cache, &hash).expect("a blue sleeve has an accent");
+
+    let value = u32::from_str_radix(&accent[1..], 16).unwrap();
+    let (r, g, b) = (value >> 16, (value >> 8) & 0xff, value & 0xff);
+    assert!(b > r && b > g, "should still read as blue, got {accent}");
+    // Re-lit for a near-black page rather than passed through raw.
+    assert!(b > 120, "too dark to use as an accent: {accent}");
+}
+
+#[test]
+fn a_greyscale_cover_offers_no_accent_rather_than_a_muddy_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+    write_wav_seeded(&dir.path().join("01.wav"), 44_100, 16, 2, 44_100, 1);
+
+    let mut buffer = image::RgbImage::new(120, 120);
+    for (x, _, pixel) in buffer.enumerate_pixels_mut() {
+        let shade = (x * 2) as u8;
+        *pixel = image::Rgb([shade, shade, shade]);
+    }
+    buffer.save(dir.path().join("cover.png")).unwrap();
+
+    let cache = ArtworkCache::new(cache_dir.path());
+    let hash = artwork::ingest(&cache, &dir.path().join("01.wav")).unwrap().unwrap();
+    assert!(
+        artwork::accent(&cache, &hash).is_none(),
+        "grey is not an accent"
+    );
+}

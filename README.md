@@ -19,10 +19,12 @@ schema, audio engine, and the reasoning behind it.
 
 ## Status
 
-**Phase 3 — feels real.** Gapless, device switching, media keys, play counts and
-history. Phases 0 to 3 were the "usable player" line; this is it.
+**Phase 4 — looks right.** The interface pass: album covers as the front door, a
+now-playing view built around the art, a waveform seek bar, and a command
+palette. The accent colour is sampled from whatever is playing, so the whole
+palette turns with the record.
 
-Measured on a real 1,419 track library (36 GB, mixed FLAC/WAV/MP3/M4A):
+Measured on a real 1,358 track library (mixed FLAC/WAV/MP3/M4A, 384 covers):
 
 | | |
 |---|---|
@@ -30,8 +32,7 @@ Measured on a real 1,419 track library (36 GB, mixed FLAC/WAV/MP3/M4A):
 | Rescan, nothing changed | 4 ms |
 | Search, per keystroke | 0.10 – 0.65 ms |
 | Decode speed | 1500x – 10700x realtime |
-| Underruns across a gapless FLAC transition | +0 |
-| Underruns across a gapless MP3 transition | +0 |
+| Underruns across a gapless transition | +0 |
 | Underruns across an output device swap | +0 |
 | Index on disk | 896 KB |
 
@@ -52,12 +53,14 @@ Working today:
 - Lock-free SPSC ring, CoreAudio output via `cpal`
 - Gapless: the next track is pre-rolled into the same ring, and "now playing"
   flips when the listener reaches the join rather than when the decoder did
-- Device switching: the stream follows the default output, keeping the open file
-  and its position
+- Device switching that keeps the open file and its position
 - Media keys and the macOS Now Playing panel via `souvlaki`
 - Play counts, skip counts and listening history
-- Queue, shuffle, repeat, seek, volume, and playback that resumes after a relaunch
-- Virtualized table that holds 60fps at 10,000 rows
+- Album grid, album view, now playing, queue with drag to reorder
+- Waveform seek bar drawn from the track's own peaks
+- Command palette on `⌘K`: search every track, run every action
+- One accent colour, sampled from the current cover
+- Virtualized everywhere: 10,000 rows and thousands of covers at 60fps
 
 Deliberately correct already, because they are easy to get wrong later:
 
@@ -66,15 +69,13 @@ Deliberately correct already, because they are easy to get wrong later:
   bit depth stays null rather than showing a meaningless "16 bit".
 - **Format comes from the stream, never the tags.**
 - **MP4 lossiness is unknown, not guessed.** The container holds AAC or ALAC.
+- **An album badge appears only when every track agrees.** A mixed album gets
+  none, which beats picking whichever format sorted first.
 - **macOS packages are not walked into.** DAW sample libraries are not tracks.
 - **A malformed tag never hides a valid file.**
-- **Rewriting a file discards its stored analysis.**
-- **Gain is ramped, never stepped.** A step between one sample and the next is
-  audible as a click.
-- **MP3 encoder delay and padding are trimmed.** Symphonia reads the LAME/Xing
-  header and trims per packet, which is why a decoded MP3 comes out at exactly
-  the frame count its container declares. Requested explicitly rather than left
-  to a default, because gapless depends on it.
+- **Gain is ramped, never stepped.**
+- **MP3 encoder delay and padding are trimmed**, so gapless is actually gapless.
+- **A greyscale sleeve yields no accent** rather than a muddy grey one.
 - **Nothing is ever written to your audio files.** Play counts live in the index.
 
 Known gaps, deliberately left for later phases:
@@ -82,15 +83,15 @@ Known gaps, deliberately left for later phases:
 - The output stream follows the file's sample rate. The fixed-rate and
   follow-album modes, and the resampler they need, are phase 5. Gapless across a
   rate change is therefore not possible, and the player falls back to an
-  ordinary gapped track change — which the design document calls out as an
-  honest, unavoidable trade.
+  ordinary gapped change.
 - The stream reports the configuration cpal negotiated, not what the hardware is
   running. A real bit-perfect verdict needs the device format read back, which
-  is phase 5.
-- Default-device *moves* are polled twice a second. A device *disappearing* is
-  reported immediately, through cpal's stream error callback. Replacing the poll
-  with a `kAudioHardwarePropertyDefaultOutputDevice` listener is a local change
-  behind the same architecture.
+  is phase 5. The now-playing readout is a sketch of that panel, not the verdict.
+- Waveform peaks are computed on demand for whatever is playing. Phase 6 folds
+  them into the analysis pass, where one decode also feeds loudness, BPM, key
+  and spectral analysis.
+- Default-device *moves* are polled twice a second; a device *disappearing* is
+  reported immediately through cpal's stream error callback.
 
 ## Roadmap
 
@@ -100,8 +101,8 @@ Known gaps, deliberately left for later phases:
 | 1 | SQLite index, incremental scan, move detection, FTS5, watcher, artwork cache | done |
 | 2 | Symphonia decode, ring buffer, CoreAudio output, queue | done |
 | 3 | Gapless, device switching, media keys, resume, play counts | done |
-| 4 | The UI pass — art grid, now playing, command palette, waveform seek | next |
-| 5 | Exclusive mode, sample rate switching, ReplayGain, signal path panel | |
+| 4 | The UI pass — art grid, now playing, command palette, waveform seek | done |
+| 5 | Exclusive mode, sample rate switching, ReplayGain, signal path panel | next |
 | 6 | Analysis pipeline, transcode detection, collection health, smart playlists | |
 
 Phases 0 to 3 are a usable player, and they are done. Everything after is the
@@ -153,6 +154,13 @@ Watch a gapless join between two tracks at the same sample rate:
 
 ```bash
 cargo run --release -p dubplate-audio --example play -- first.flac second.flac --gapless
+```
+
+See the accent colour each cached cover produces:
+
+```bash
+cargo run --release -p dubplate-library --example accents -- \
+  ~/Library/Application\ Support/com.swayammishra.dubplate/artwork
 ```
 
 Tests:
