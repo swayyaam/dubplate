@@ -434,6 +434,7 @@ fn current_artwork(path: &Path) -> Option<Vec<u8>> {
 /// against the file as the previous pass left it, is what actually produces
 /// both chunks.
 fn write_one(path: &Path, edit: &TagEdit, cover: Option<&Cover>) -> Result<()> {
+    use lofty::file::AudioFile;
     use lofty::tag::TagExt;
 
     let tagged = probe(path)?;
@@ -447,19 +448,26 @@ fn write_one(path: &Path, edit: &TagEdit, cover: Option<&Cover>) -> Result<()> {
         .with_context(|| format!("copying {} before writing tags", path.display()))?;
 
     let outcome = (|| -> Result<()> {
-        for tag_type in write_targets(file_type) {
-            let mut tag = match tagged.tag(tag_type) {
-                Some(tag) => tag.clone(),
-                // A convention this file has never carried starts from what the
-                // other one says, not from nothing. Two chunks that disagree
-                // are worse than one chunk, because which one a reader believes
-                // is then a coin toss.
-                None => seed(tag_type, existing.as_ref()),
-            };
-            apply(&mut tag, edit, cover)?;
-            tag.save_to_path(&temp, WriteOptions::default())
-                .with_context(|| format!("writing {tag_type:?} to {}", path.display()))?;
-        }
+        let target = write_target(&tagged);
+
+        // A fresh tag carrying the file's values, never the parsed tag itself.
+        //
+        // Cloning what lofty read and saving it back produces a chunk that a
+        // later save cannot replace: the second edit reports success and the
+        // file keeps the first edit's values. Rebuilding the tag from its
+        // fields sidesteps that, at the cost of dropping frames this module
+        // does not model.
+        let mut tag = seed(target, tagged.tag(target).or(existing.as_ref()));
+        apply(&mut tag, edit, cover)?;
+        tag.save_to_path(&temp, WriteOptions::default())
+            .with_context(|| format!("writing {target:?} to {}", path.display()))?;
+
+        // Nothing counts as written until it can be read back.
+        anyhow::ensure!(
+            verify(&temp, edit),
+            "the tag writer reported success but {} did not change",
+            path.display()
+        );
         Ok(())
     })();
 
@@ -471,6 +479,22 @@ fn write_one(path: &Path, edit: &TagEdit, cover: Option<&Cover>) -> Result<()> {
     std::fs::rename(&temp, path)
         .with_context(|| format!("replacing {} with the rewritten copy", path.display()))?;
     Ok(())
+}
+
+/// Read a file back and confirm the edit is actually in it.
+///
+/// Not paranoia: a tag save can report success and leave the previous values
+/// in the file, which is the worst kind of failure here -- the editor would
+/// show a change that never happened, and undo would record a state that never
+/// existed. Nothing counts as written until it can be read back.
+fn verify(path: &Path, edit: &TagEdit) -> bool {
+    let Ok(values) = read_one(path) else {
+        return false;
+    };
+    edit.fields.iter().all(|change| {
+        let wanted = change.value.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        values.get(&change.field).map(String::as_str) == wanted
+    })
 }
 
 /// A new tag of `tag_type`, carrying whatever the file already said.
@@ -533,31 +557,29 @@ fn apply(tag: &mut Tag, edit: &TagEdit, cover: Option<&Cover>) -> Result<()> {
     Ok(())
 }
 
-/// Which tag formats to write for a container.
+/// The one tag this file's edits go into.
 ///
-/// WAV and AIFF are the awkward ones: both support a native text chunk and an
-/// embedded ID3v2 chunk, and software disagrees about which to read. Rekordbox
-/// and Serato prefer ID3v2, the Finder and older tools read the native chunk,
-/// so both are written. Everything else has exactly one sensible answer.
-fn write_targets(file_type: FileType) -> Vec<TagType> {
-    match file_type {
-        // The order matters and is not cosmetic. Writing the native chunk
-        // first and ID3v2 second leaves both in the file; the other way round,
-        // saving the native chunk rewrites the container's chunk list and the
-        // ID3v2 chunk written moments earlier is silently gone -- no error, it
-        // simply is not there when the file is read back. Established by
-        // writing real files and reading them again, and pinned by a test.
-        FileType::Wav => vec![TagType::RiffInfo, TagType::Id3v2],
-        FileType::Aiff => vec![TagType::AiffText, TagType::Id3v2],
-        FileType::Flac | FileType::Vorbis | FileType::Opus | FileType::Speex => {
-            vec![TagType::VorbisComments]
-        }
-        FileType::Mpeg => vec![TagType::Id3v2],
-        FileType::Mp4 => vec![TagType::Mp4Ilst],
-        FileType::Ape | FileType::WavPack | FileType::Mpc => vec![TagType::Ape],
-        // Whatever this container calls its primary tag. Better than refusing.
-        other => vec![other.primary_tag_type()],
+/// Whichever convention the file already uses, and ID3v2 for a file that has
+/// none. WAV and AIFF each support two -- a native text chunk and an embedded
+/// ID3v2 chunk -- and writing both is not achievable here: lofty 0.25 cannot
+/// keep two chunks in step across repeated writes, through either its generic
+/// or its container-specific API, so editing a file twice leaves one of them
+/// holding the previous edit. A file whose two chunks disagree is worse than a
+/// file with one, because which artist you see then depends on which program
+/// opened it.
+///
+/// Updating what is already there means an edit never introduces a second,
+/// competing chunk, and never has to remove one either. For the case this
+/// feature exists for -- a download with no tags at all -- that resolves to
+/// ID3v2, which is what Rekordbox, Serato and Traktor read.
+fn write_target(tagged: &lofty::file::TaggedFile) -> TagType {
+    if let Some(tag) = tagged.primary_tag() {
+        return tag.tag_type();
     }
+    if let Some(tag) = tagged.first_tag() {
+        return tag.tag_type();
+    }
+    tagged.primary_tag_type()
 }
 
 /// A temporary name beside the original, so the rename that follows stays
@@ -566,8 +588,17 @@ fn temp_beside(path: &Path) -> Result<PathBuf> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
-    let stem = path.file_name().unwrap_or_default().to_string_lossy();
-    Ok(parent.join(format!(".{stem}.dubplate-tmp")))
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    // The extension is kept. Tag writers decide what a file is partly from its
+    // name, and handing one a ".dubplate-tmp" makes it guess -- which is how a
+    // write can report success and leave the file unchanged.
+    match path.extension() {
+        Some(extension) => Ok(parent.join(format!(
+            "{stem}.dubplate-tmp.{}",
+            extension.to_string_lossy()
+        ))),
+        None => Ok(parent.join(format!("{stem}.dubplate-tmp"))),
+    }
 }
 
 /// Bring the index back in step with files we have just rewritten.

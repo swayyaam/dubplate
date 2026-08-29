@@ -75,6 +75,12 @@ Deliberately correct, because each is easy to get wrong:
 - **Writes go through a copy and a rename**, which is atomic within a
   directory. An interrupted write leaves the old file or the new one, never
   half of either.
+- **A write is not written until it can be read back.** A tag save can report
+  success and leave the previous values in the file. Every write re-reads the
+  file and confirms the edit is in it, and reports a failure if it is not --
+  the editor must never show a change that did not happen, and undo must never
+  record a state that never existed. There is a known case where this fires:
+  see Limitations.
 - **Undo is the write path pointed backwards**, not a second implementation of
   it: every write records what the fields held before, and undoing replays
   those values through the same code. Only the newest operation can be undone,
@@ -238,3 +244,19 @@ pnpm typecheck
 ## Licence
 
 MIT.
+
+## Limitations
+
+- **Repeated tag edits can fail on some files.** A second write to a file that
+  another tool tagged in a particular way reports success without changing it.
+  Rather than trust the writer, every write is verified by reading the file
+  back, so this surfaces as an error and the file is left untouched -- but the
+  edit does not go through. Every file in the collection this was built against
+  survives repeated edit-and-undo cycles; it reproduces on a synthetic fixture,
+  and four tests are marked `#[ignore]` recording it. Run them with
+  `cargo test -- --ignored`.
+- **Smart playlists ship as ready-made rule sets**, not a visual rule editor.
+  The engine takes arbitrary rules and stores them as JSON; only the editor is
+  missing.
+- **Crossfade** appears in the signal path and always reads "none".
+- Tempo and key detection are the design document's honest 80%.

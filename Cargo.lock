@@ -1329,6 +1329,7 @@ name = "dubplate-analysis"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "dubplate-audio",
  "dubplate-library",
  "ebur128",

@@ -19,4 +19,5 @@ rusqlite = "0.40.2"
 
 [dev-dependencies]
 serde_json.workspace = true
+blake3 = "1.8.7"
 tempfile = "3.27.0"
