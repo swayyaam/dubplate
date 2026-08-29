@@ -1,6 +1,8 @@
 //! Scan a folder from the terminal, without launching the app.
 //!
 //!     cargo run --release -p dubplate-library --example scan -- ~/Music
+//!
+//! Pass --json to dump the whole report instead of the summary.
 
 use std::path::PathBuf;
 
@@ -14,6 +16,11 @@ fn main() {
 
     let root = PathBuf::from(shellexpand(&arg));
     let report = scan_folder(&root);
+
+    if std::env::args().any(|a| a == "--json") {
+        println!("{}", serde_json::to_string(&report).unwrap());
+        return;
+    }
 
     let mut lossless = 0;
     let mut lossy = 0;

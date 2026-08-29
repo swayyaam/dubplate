@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
@@ -16,6 +17,29 @@ pub const AUDIO_EXTENSIONS: &[&str] = &[
     "flac", "wav", "wave", "aiff", "aif", "aifc", "mp3", "m4a", "m4b", "mp4", "aac", "ogg", "oga",
     "opus", "wv", "ape", "mpc",
 ];
+
+/// Directory extensions that mark a macOS package rather than a folder of music.
+///
+/// These are opaque application bundles. Logic's sample library alone holds
+/// thousands of single-note WAVs, and a DAW project package holds stems and
+/// takes -- none of it is a track anyone wants in a player. Descending into
+/// them is how a 1,300 track library turns into a 2,800 track one.
+pub const PACKAGE_EXTENSIONS: &[&str] = &[
+    "bundle", "app", "framework", "component", "plugin", "vst", "vst3", "audiounit",
+    "logicx", "band", "ptx", "photoslibrary", "musiclibrary", "tvlibrary", "imovielibrary",
+    "aplibrary", "fcpbundle",
+];
+
+fn is_package_dir(name: &OsStr) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_ascii_lowercase();
+            PACKAGE_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
 
 fn has_audio_extension(path: &Path) -> bool {
     path.extension()
@@ -39,6 +63,14 @@ pub fn scan_folder(root: &Path) -> ScanReport {
     // and mtime from the walk's own stat so the tag pass does not stat again.
     let candidates: Vec<(PathBuf, u64, i64)> = WalkDir::new(root)
         .skip_hidden(true)
+        // Prune package directories before descending, so their contents are
+        // never stat'd at all.
+        .process_read_dir(|_depth, _path, _state, children| {
+            children.retain(|child| match child {
+                Ok(entry) => !(entry.file_type().is_dir() && is_package_dir(&entry.file_name())),
+                Err(_) => true,
+            });
+        })
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())

@@ -46,9 +46,11 @@ button, input { font: inherit; color: inherit; }
 
 /* --- shell ---------------------------------------------------------------- */
 
+/* Flex rather than grid: the toolbar and status bar only exist once a folder
+   is loaded, and grid would hand `main` a fixed row when they are absent. */
 .app {
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   height: 100%;
 }
 
@@ -73,8 +75,6 @@ button, input { font: inherit; color: inherit; }
 .titlebar__path {
   color: var(--text-faint);
   font-size: 12px;
-  direction: rtl;          /* keep the meaningful tail visible when it truncates */
-  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -124,7 +124,7 @@ button, input { font: inherit; color: inherit; }
 }
 .button--primary:hover:not(:disabled) { background: #f0b155; color: #17130a; }
 
-.main { min-height: 0; display: flex; flex-direction: column; }
+.main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 /* --- table ---------------------------------------------------------------- */
 

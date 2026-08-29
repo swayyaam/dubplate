@@ -78,7 +78,11 @@ export default function App() {
     <div className="app">
       <header className="titlebar" data-tauri-drag-region>
         <span className="wordmark" data-tauri-drag-region>dubplate</span>
-        {report && <span className="titlebar__path" data-tauri-drag-region>{report.root}</span>}
+        {report && (
+          <span className="titlebar__path" data-tauri-drag-region title={report.root}>
+            {homeRelative(report.root)}
+          </span>
+        )}
       </header>
 
       {report && (
@@ -107,11 +111,17 @@ export default function App() {
       <main className="main">
         {error && <div className="notice notice--error">{error}</div>}
 
-        {!report && !scanning && !error && (
+        {/* Also shown after a failed scan: a saved folder that has moved must not
+            leave the app with an error and no way to pick another one. */}
+        {!report && !scanning && (
           <div className="empty">
-            <h1 className="empty__title">Point dubplate at your music</h1>
+            <h1 className="empty__title">
+              {error ? "Could not read that folder" : "Point dubplate at your music"}
+            </h1>
             <p className="empty__body">
-              Nothing is copied, moved or written. The folder on disk stays the source of truth.
+              {error
+                ? "It may have moved, or be on a drive that is not mounted."
+                : "Nothing is copied, moved or written. The folder on disk stays the source of truth."}
             </p>
             <button className="button button--primary" onClick={() => void chooseFolder()}>
               Choose folder
@@ -159,6 +169,11 @@ export default function App() {
       )}
     </div>
   );
+}
+
+/** /Users/someone/Music -> ~/Music. macOS only, which is what this targets. */
+function homeRelative(path: string): string {
+  return path.replace(/^\/Users\/[^/]+/, "~");
 }
 
 function summarise(tracks: ScannedTrack[]) {

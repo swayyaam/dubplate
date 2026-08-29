@@ -95,3 +95,22 @@ fn recurses_into_subdirectories() {
 
     assert_eq!(report.tracks.len(), 2);
 }
+
+#[test]
+fn does_not_descend_into_macos_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    write_wav(&dir.path().join("keeper.wav"), 44_100, 16, 2, 44_100);
+
+    // A DAW sample library is a package full of one-note WAVs. None of it is a
+    // track, and walking in is how half a library turns into orchestral stabs.
+    let samples = dir.path().join("Logic Pro Library.bundle").join("Samples");
+    fs::create_dir_all(&samples).unwrap();
+    write_wav(&samples.join("FL1_stac_C4.wav"), 44_100, 16, 2, 4_410);
+    write_wav(&samples.join("FL1_stac_C5.wav"), 44_100, 16, 2, 4_410);
+
+    let report = scan_folder(dir.path());
+
+    assert_eq!(report.files_seen, 1, "package contents must not be stat'd");
+    assert_eq!(report.tracks.len(), 1);
+    assert_eq!(report.tracks[0].file_name, "keeper.wav");
+}
