@@ -324,15 +324,28 @@ fn now_playing_metadata(state: &Arc<AppState>, track_id: i64) -> Option<(String,
 fn resolve_queue(state: &Arc<AppState>, track_ids: &[i64]) -> Fallible<Vec<QueueItem>> {
     let library = state.library.lock().map_err(to_error)?;
     let mut items = Vec::with_capacity(track_ids.len());
+    // Album and ReplayGain come along with the path: the engine needs the album
+    // to decide when "follow album" may change the device rate, and the gain to
+    // level the track without a second round trip.
     let mut stmt = library
         .connection()
-        .prepare("SELECT path FROM tracks WHERE id = ?1")
+        .prepare("SELECT path, album_id, rg_track_gain, rg_track_peak FROM tracks WHERE id = ?1")
         .map_err(to_error)?;
     for id in track_ids {
-        if let Ok(path) = stmt.query_row([id], |row| row.get::<_, String>(0)) {
+        if let Ok((path, album_id, gain, peak)) = stmt.query_row([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<f32>>(2)?,
+                row.get::<_, Option<f32>>(3)?,
+            ))
+        }) {
             items.push(QueueItem {
                 track_id: *id,
                 path,
+                album_id,
+                replay_gain_db: gain,
+                replay_gain_peak: peak,
             });
         }
     }
