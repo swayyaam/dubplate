@@ -1,0 +1,255 @@
+/* ---------------------------------------------------------------------------
+   dubplate — near-black, one accent, type-driven. Spacing does the work that
+   borders normally would. Dark only; there is no light theme by design.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --bg: #0a0a0b;
+  --bg-raised: #111113;
+  --hover: rgba(255, 255, 255, 0.035);
+  --hairline: rgba(255, 255, 255, 0.06);
+
+  --text: #ededef;
+  --text-dim: #94949e;
+  --text-faint: #5c5c66;
+
+  /* Warm, like the acetate the app is named after. Green and amber stay
+     reserved for the bit-perfect verdict in the phase 5 signal path panel. */
+  --accent: #e8a33d;
+  --accent-soft: rgba(232, 163, 61, 0.12);
+  --danger: #e2685c;
+
+  --row-height: 44px;
+  --gutter: 24px;
+  --cols: 52px minmax(200px, 3fr) minmax(140px, 2fr) minmax(140px, 2fr) 132px 64px;
+
+  --sans: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --mono: "SF Mono", ui-monospace, "JetBrains Mono", monospace;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13.5px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button, input { font: inherit; color: inherit; }
+
+/* --- shell ---------------------------------------------------------------- */
+
+.app {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  height: 100%;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 52px;
+  /* Leaves room for the macOS traffic lights, which sit over the content. */
+  padding: 0 var(--gutter) 0 88px;
+  user-select: none;
+}
+
+.wordmark {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.titlebar__path {
+  color: var(--text-faint);
+  font-size: 12px;
+  direction: rtl;          /* keep the meaningful tail visible when it truncates */
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--gutter) 14px;
+}
+
+.search {
+  flex: 1;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: var(--bg-raised);
+  color: var(--text);
+  outline: none;
+  transition: box-shadow 120ms ease;
+}
+.search::placeholder { color: var(--text-faint); }
+.search:focus { box-shadow: 0 0 0 1.5px var(--accent-soft), 0 0 0 1px var(--accent); }
+
+.button {
+  height: 32px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 7px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+.button:hover:not(:disabled) { background: #17171a; color: var(--text); }
+.button:disabled { opacity: 0.5; cursor: default; }
+
+.button--primary {
+  height: 36px;
+  padding: 0 20px;
+  background: var(--accent);
+  color: #17130a;
+  font-weight: 550;
+}
+.button--primary:hover:not(:disabled) { background: #f0b155; color: #17130a; }
+
+.main { min-height: 0; display: flex; flex-direction: column; }
+
+/* --- table ---------------------------------------------------------------- */
+
+.table { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+
+.table__head,
+.row {
+  display: grid;
+  grid-template-columns: var(--cols);
+  align-items: center;
+  gap: 16px;
+  padding: 0 var(--gutter);
+}
+
+.table__head {
+  height: 30px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.table__body { flex: 1; overflow-y: auto; outline: none; }
+.table__canvas { position: relative; width: 100%; }
+
+.row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  cursor: default;
+  border-radius: 0;
+}
+.row:hover { background: var(--hover); }
+
+.row--selected { background: var(--accent-soft); }
+.row--selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+}
+.table__body:focus-visible .row--selected { background: rgba(232, 163, 61, 0.18); }
+
+.col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col--num { font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); text-align: right; font-variant-numeric: tabular-nums; }
+.col--title { color: var(--text); }
+.col--dim { color: var(--text-dim); }
+.col--time { font-family: var(--mono); font-size: 12px; color: var(--text-dim); text-align: right; font-variant-numeric: tabular-nums; }
+.col--format { overflow: visible; }
+
+/* --- format badge --------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+.badge__codec { font-weight: 600; }
+.badge__spec { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+.badge--lossless .badge__codec { color: var(--text); }
+.badge--lossy .badge__codec { color: var(--text-faint); font-weight: 500; }
+.badge--unknown .badge__codec { color: var(--text-faint); font-weight: 500; }
+
+/* --- empty state ---------------------------------------------------------- */
+
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 40px;
+  text-align: center;
+}
+.empty__title { margin: 0; font-size: 22px; font-weight: 550; letter-spacing: -0.015em; }
+.empty__body { margin: 0; max-width: 40ch; color: var(--text-dim); line-height: 1.55; }
+
+.notice {
+  margin: 0 var(--gutter) 12px;
+  padding: 10px 14px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.notice--error { background: rgba(226, 104, 92, 0.1); color: var(--danger); }
+
+/* --- status bar ----------------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 var(--gutter);
+  border-top: 1px solid var(--hairline);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.statusbar__spacer { flex: 1; }
+.statusbar__dim { color: var(--text-faint); }
+.statusbar__health { color: var(--text-dim); }
+.statusbar__warn { color: var(--danger); cursor: help; }
+
+.dot { width: 2px; height: 2px; border-radius: 50%; background: var(--text-faint); }
+
+/* --- scrollbar ------------------------------------------------------------ */
+
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.09);
+  border: 3px solid var(--bg);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.16); }
