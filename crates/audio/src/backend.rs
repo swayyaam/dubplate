@@ -9,8 +9,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, StreamConfig};
 
 use crate::device::{
-    AudioBackend, AudioError, DeviceId, DeviceInfo, OutputStream, Renderer, Result, StreamInfo,
-    StreamRequest,
+    AudioBackend, AudioError, DeviceId, DeviceInfo, ErrorSink, OutputStream, Renderer, Result,
+    StreamInfo, StreamRequest,
 };
 
 pub struct CpalBackend;
@@ -106,6 +106,7 @@ impl AudioBackend for CpalBackend {
         id: &DeviceId,
         request: StreamRequest,
         mut renderer: Box<dyn Renderer>,
+        on_error: ErrorSink,
     ) -> Result<Box<dyn OutputStream>> {
         let host = cpal::default_host();
         let device = Self::find(&host, id)?;
@@ -137,7 +138,19 @@ impl AudioBackend for CpalBackend {
                 move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     renderer.render(output, channels);
                 },
-                |err| tracing::error!(%err, "output stream error"),
+                move |err| {
+                    // cpal reports a disconnect or a reroute here rather than
+                    // failing the next callback, which is the only notification
+                    // macOS gives without a CoreAudio property listener.
+                    let mapped = match err.kind() {
+                        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::DeviceChanged => {
+                            AudioError::DeviceLost
+                        }
+                        _ => AudioError::Device(err.to_string()),
+                    };
+                    tracing::warn!(%err, "output stream error");
+                    on_error(mapped);
+                },
                 None,
             )
             .map_err(|err| AudioError::Device(err.to_string()))?;

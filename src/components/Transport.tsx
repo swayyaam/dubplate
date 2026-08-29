@@ -99,6 +99,21 @@ export const Transport = memo(function Transport({ trackById, onNowPlayingChange
       </div>
 
       <div className="transport__meta">
+        {/* The doc's rule for an interface being unplugged: pause, and say so.
+            Silently doing nothing is how a player looks broken. */}
+        {state.error && (
+          <span className="chip chip--error" title={state.error}>
+            {state.error}
+          </span>
+        )}
+        {state.underruns > 0 && !state.error && (
+          <span
+            className="chip chip--warn"
+            title={`The decoder fell behind and the device ran dry ${state.underruns} times`}
+          >
+            {state.underruns} dropouts
+          </span>
+        )}
         {state.source && <SignalChip state={state} />}
         <button
           className={`icon${state.shuffle ? " icon--on" : ""}`}

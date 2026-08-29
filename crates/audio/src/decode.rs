@@ -123,8 +123,17 @@ impl TrackDecoder {
             return Err(DecodeError::NoAudioTrack(path.display().to_string()));
         };
 
-        let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&params, &AudioDecoderOptions::default())?;
+        // Stated rather than left to the default, because gapless depends on it.
+        //
+        // MP3 carries encoder delay and padding in its LAME/Xing header, and a
+        // player that does not trim them puts a few tens of milliseconds of
+        // silence between every pair of tracks. Symphonia reads the LAME tag and
+        // trims per packet when this is on, which is why a decoded MP3 comes out
+        // at exactly the frame count its container declares.
+        let decoder = symphonia::default::get_codecs().make_audio_decoder(
+            &params,
+            &AudioDecoderOptions::default().gapless(true),
+        )?;
 
         let format = SourceFormat {
             codec: decoder.codec_info().short_name.to_string(),

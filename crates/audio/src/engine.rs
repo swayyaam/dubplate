@@ -5,8 +5,9 @@
 //! and feeds the ring, and the audio callback drains it. They share only
 //! atomics and the ring itself.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::CpalBackend;
 use crate::decode::TrackDecoder;
-use crate::device::{AudioBackend, DeviceInfo, OutputStream, StreamRequest};
-use crate::ring::{self, PlaybackShared};
+use crate::device::{AudioBackend, AudioError, DeviceInfo, OutputStream, StreamRequest};
+use crate::ring::{self, Boundary, PlaybackShared};
 
 /// How long the decode thread will wait for the callback to acknowledge a seek
 /// before writing anyway. Only reached if the stream is not running, in which
@@ -29,6 +30,20 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
 /// realtime, so this is normally a couple of milliseconds -- well inside the
 /// "sound in under 100ms" rule.
 const PRIME_TIMEOUT: Duration = Duration::from_millis(120);
+
+/// How much of the current track must be left before the next one is opened and
+/// decoded into the same ring. Long enough to absorb a slow disk, short enough
+/// that skipping around does not keep opening files nobody will hear.
+const PREROLL_SECONDS: f64 = 5.0;
+
+/// A track is counted as played once half of it has been heard.
+const COMPLETION_FRACTION: f64 = 0.5;
+
+/// How often the default output device is re-checked, in control-loop ticks of
+/// 50ms. cpal reports a device *disappearing* through the stream's error
+/// callback, but not the system default *moving* -- plugging in headphones
+/// while the interface stays connected -- so that half is polled.
+const DEVICE_CHECK_TICKS: u8 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,7 +75,26 @@ pub enum Command {
     SetVolume(f32),
     SetRepeat(RepeatMode),
     SetShuffle(bool),
+    /// Move playback to the current default output device, rebuilding the ring
+    /// and the stream but keeping the open file and its position.
+    ///
+    /// Normally driven by a device change being detected. Exposed because it is
+    /// also the honest answer to "audio has got stuck", and because it is the
+    /// only way to exercise the swap on a machine with one output device.
+    ReopenOutput,
     Shutdown,
+}
+
+/// One finished listen, ready to be written to the history table.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayEvent {
+    pub track_id: i64,
+    /// The furthest point reached, not wall-clock time: seeking back and forth
+    /// should not inflate how much of a track was heard.
+    pub ms_played: u64,
+    /// Crossed the halfway mark. Anything less counts as a skip.
+    pub completed: bool,
 }
 
 /// What the file is, straight from the stream. The basis of the phase 5 panel.
@@ -123,6 +157,7 @@ pub struct Engine {
     state: Arc<Mutex<PlayerState>>,
     /// The rate the current stream runs at, for turning frames into milliseconds.
     sample_rate: Arc<AtomicU32>,
+    plays: Arc<Mutex<Vec<PlayEvent>>>,
 }
 
 impl Engine {
@@ -131,6 +166,7 @@ impl Engine {
         let shared = Arc::new(PlaybackShared::new());
         let state = Arc::new(Mutex::new(PlayerState::default()));
         let sample_rate = Arc::new(AtomicU32::new(44_100));
+        let plays = Arc::new(Mutex::new(Vec::new()));
 
         // Built inside the thread, not moved into it: the output stream handle
         // is not Send on macOS, so whichever thread opens one must own it.
@@ -140,7 +176,8 @@ impl Engine {
                 let shared = Arc::clone(&shared);
                 let state = Arc::clone(&state);
                 let sample_rate = Arc::clone(&sample_rate);
-                move || Control::new(rx, shared, state, sample_rate).run()
+                let plays = Arc::clone(&plays);
+                move || Control::new(rx, shared, state, sample_rate, plays).run()
             })
             .expect("spawning the control thread");
 
@@ -149,7 +186,17 @@ impl Engine {
             shared,
             state,
             sample_rate,
+            plays,
         }
+    }
+
+    /// Take the listens finished since the last call, for the history table.
+    /// Draining rather than reading means nothing is counted twice.
+    pub fn take_play_events(&self) -> Vec<PlayEvent> {
+        self.plays
+            .lock()
+            .map(|mut plays| std::mem::take(&mut *plays))
+            .unwrap_or_default()
     }
 
     pub fn send(&self, command: Command) {
@@ -180,14 +227,25 @@ impl Drop for Engine {
 // ── decode thread ───────────────────────────────────────────────────────────
 
 enum DecodeCommand {
-    /// A new track. `producer` is `Some` only when the ring was rebuilt, which
-    /// happens when the output stream had to change rate or channel count.
+    /// A new track, starting now. `sinks` is `Some` only when the ring was
+    /// rebuilt: a rate change, a channel-count change, or a device switch.
     Play {
         decoder: Box<TrackDecoder>,
-        producer: Option<Producer<f32>>,
+        sinks: Option<(Producer<f32>, Producer<Boundary>)>,
         generation: u64,
     },
+    /// The next track, decoded into the same ring behind the current one so
+    /// there is no gap when the current one ends.
+    Preroll { decoder: Box<TrackDecoder>, seq: u64 },
+    /// Nothing follows the current track; let it end.
+    NoFollowUp,
     Seek {
+        frames: u64,
+        generation: u64,
+    },
+    /// Keep decoding the same file into a new ring, after a device change.
+    Rebind {
+        sinks: (Producer<f32>, Producer<Boundary>),
         frames: u64,
         generation: u64,
     },
@@ -196,48 +254,103 @@ enum DecodeCommand {
 }
 
 enum DecodeEvent {
-    /// The track played to its end. Not an error.
+    /// The current track is nearly decoded; send the next one to pre-roll.
+    NeedNext,
+    /// The queue ran out with nothing pre-rolled. Not an error.
     Finished,
     Failed(String),
 }
 
-/// Owns the open file and keeps the ring fed. Never blocks on the callback.
+/// Owns the open files and keeps the ring fed. Never blocks on the callback.
+///
+/// Holds two decoders once a track is nearly through: the one playing and the
+/// one behind it. Both write into the same ring, and the moment the listener
+/// crosses from one to the other is marked with a [`Boundary`] rather than
+/// announced when the decoder switches -- which would be up to 150ms early.
 fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: Arc<PlaybackShared>) {
-    let mut decoder: Option<Box<TrackDecoder>> = None;
-    let mut producer: Option<Producer<f32>> = None;
+    let mut current: Option<Box<TrackDecoder>> = None;
+    let mut queued: Option<(Box<TrackDecoder>, u64)> = None;
+    let mut audio: Option<Producer<f32>> = None;
+    let mut boundaries: Option<Producer<Boundary>> = None;
     // Samples decoded but not yet written, because the ring was full.
     let mut pending: Vec<f32> = Vec::new();
     let mut pending_at = 0usize;
+    let mut frames_written = 0u64;
+    let mut generation = 0u64;
+    let mut asked_for_next = false;
 
     loop {
         match rx.try_recv() {
             Ok(DecodeCommand::Play {
-                decoder: new_decoder,
-                producer: new_producer,
-                generation,
+                decoder,
+                sinks,
+                generation: new_generation,
             }) => {
-                decoder = Some(new_decoder);
-                if let Some(new_producer) = new_producer {
-                    producer = Some(new_producer);
+                current = Some(decoder);
+                queued = None;
+                asked_for_next = false;
+                if let Some((new_audio, new_boundaries)) = sinks {
+                    audio = Some(new_audio);
+                    boundaries = Some(new_boundaries);
                 }
                 pending.clear();
                 pending_at = 0;
-                await_drain(&shared, generation);
+                frames_written = 0;
+                generation = new_generation;
+                await_drain(&shared, new_generation);
             }
-            Ok(DecodeCommand::Seek { frames, generation }) => {
-                if let Some(decoder) = decoder.as_mut() {
+            Ok(DecodeCommand::Preroll { decoder, seq }) => {
+                queued = Some((decoder, seq));
+            }
+            Ok(DecodeCommand::NoFollowUp) => {
+                // Leave `asked_for_next` set so we do not keep asking.
+                queued = None;
+            }
+            Ok(DecodeCommand::Seek {
+                frames,
+                generation: new_generation,
+            }) => {
+                if let Some(decoder) = current.as_mut() {
                     if let Err(err) = decoder.seek(frames) {
                         let _ = tx.send(DecodeEvent::Failed(err.to_string()));
                     }
                 }
+                // A seek invalidates the pre-roll: the track may no longer be
+                // about to end, and any boundary already queued is meaningless.
+                queued = None;
+                asked_for_next = false;
                 pending.clear();
                 pending_at = 0;
+                frames_written = 0;
+                generation = new_generation;
                 // Do not write until the callback has thrown away the audio
                 // belonging to where we were, or it will discard this too.
-                await_drain(&shared, generation);
+                await_drain(&shared, new_generation);
+            }
+            Ok(DecodeCommand::Rebind {
+                sinks,
+                frames,
+                generation: new_generation,
+            }) => {
+                // The device changed underneath us. The file stays open and
+                // keeps its position; only the ring and the stream are new.
+                if let Some(decoder) = current.as_mut() {
+                    let _ = decoder.seek(frames);
+                }
+                audio = Some(sinks.0);
+                boundaries = Some(sinks.1);
+                queued = None;
+                asked_for_next = false;
+                pending.clear();
+                pending_at = 0;
+                frames_written = 0;
+                generation = new_generation;
+                await_drain(&shared, new_generation);
             }
             Ok(DecodeCommand::Stop) => {
-                decoder = None;
+                current = None;
+                queued = None;
+                asked_for_next = false;
                 pending.clear();
                 pending_at = 0;
             }
@@ -245,13 +358,26 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
             Err(TryRecvError::Empty) => {}
         }
 
-        let (Some(active), Some(sink)) = (decoder.as_mut(), producer.as_mut()) else {
+        let (Some(active), Some(sink)) = (current.as_mut(), audio.as_mut()) else {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         };
 
+        // Ask for the next track while there is still audio to cover opening it.
+        if !asked_for_next && queued.is_none() {
+            if let Some(total) = active.format().total_frames {
+                let rate = active.format().sample_rate.max(1) as f64;
+                let remaining = total.saturating_sub(active.position_frames()) as f64 / rate;
+                if remaining <= PREROLL_SECONDS {
+                    asked_for_next = true;
+                    let _ = tx.send(DecodeEvent::NeedNext);
+                }
+            }
+        }
+
+        let channels = active.format().channels.max(1) as u64;
         let capacity = sink.buffer().capacity();
-        shared.set_buffered_frames((capacity - sink.slots()) as u64);
+        shared.set_buffered_frames(((capacity - sink.slots()) as u64) / channels);
 
         let free = sink.slots();
         if free == 0 {
@@ -266,6 +392,7 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
                 let _ = sink.push(*sample);
             }
             pending_at += take;
+            frames_written += take as u64 / channels;
             continue;
         }
 
@@ -275,12 +402,27 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
                 pending.extend_from_slice(block);
                 pending_at = 0;
             }
-            Ok(None) => {
-                decoder = None;
-                let _ = tx.send(DecodeEvent::Finished);
-            }
+            Ok(None) => match queued.take() {
+                // Gapless: the next track's audio goes straight into the ring
+                // behind this one, with a marker where the listener crosses over.
+                Some((next, seq)) => {
+                    if let Some(marks) = boundaries.as_mut() {
+                        let _ = marks.push(Boundary {
+                            generation,
+                            at_frame: frames_written,
+                            seq,
+                        });
+                    }
+                    current = Some(next);
+                    asked_for_next = false;
+                }
+                None => {
+                    current = None;
+                    let _ = tx.send(DecodeEvent::Finished);
+                }
+            },
             Err(err) => {
-                decoder = None;
+                current = None;
                 let _ = tx.send(DecodeEvent::Failed(err.to_string()));
             }
         }
@@ -299,6 +441,23 @@ fn await_drain(shared: &PlaybackShared, generation: u64) {
 }
 
 // ── control thread ──────────────────────────────────────────────────────────
+
+/// A track handed to the decoder to pre-roll, waiting for the listener to
+/// actually reach it.
+struct PendingTrack {
+    seq: u64,
+    cursor: usize,
+    track_id: i64,
+    duration_ms: u64,
+    source: SourceSnapshot,
+}
+
+/// How much of the current track has been heard, for the history table.
+struct PlayProgress {
+    track_id: i64,
+    furthest_ms: u64,
+    duration_ms: u64,
+}
 
 struct Control {
     commands: Receiver<Command>,
@@ -321,6 +480,18 @@ struct Control {
     shuffle: bool,
     volume: f32,
     rng: u64,
+
+    plays: Arc<Mutex<Vec<PlayEvent>>>,
+    progress: Option<PlayProgress>,
+    pending: VecDeque<PendingTrack>,
+    next_seq: u64,
+    seen_boundary: u64,
+
+    /// Set from the stream's error callback when the device goes away.
+    device_lost: Arc<AtomicBool>,
+    /// True while there is no usable device, so playback resumes on reconnect.
+    awaiting_device: bool,
+    device_check: u8,
 }
 
 impl Control {
@@ -329,6 +500,7 @@ impl Control {
         shared: Arc<PlaybackShared>,
         state: Arc<Mutex<PlayerState>>,
         sample_rate: Arc<AtomicU32>,
+        plays: Arc<Mutex<Vec<PlayEvent>>>,
     ) -> Self {
         let (decode_tx, decode_command_rx) = mpsc::channel();
         let (decode_event_tx, decode_rx) = mpsc::channel();
@@ -359,6 +531,14 @@ impl Control {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0x2545F4914F6CDD1D)
                 | 1,
+            plays,
+            progress: None,
+            pending: VecDeque::new(),
+            next_seq: 1,
+            seen_boundary: 0,
+            device_lost: Arc::new(AtomicBool::new(false)),
+            awaiting_device: false,
+            device_check: 0,
         }
     }
 
@@ -373,6 +553,7 @@ impl Control {
 
             while let Ok(event) = self.decode_rx.try_recv() {
                 match event {
+                    DecodeEvent::NeedNext => self.preroll_next(),
                     DecodeEvent::Finished => self.on_track_finished(),
                     DecodeEvent::Failed(message) => {
                         self.set_error(Some(message));
@@ -380,6 +561,8 @@ impl Control {
                     }
                 }
             }
+            self.observe_boundary();
+            self.check_output_device();
             self.publish();
         }
         let _ = self.decode_tx.send(DecodeCommand::Shutdown);
@@ -430,6 +613,10 @@ impl Control {
                 self.volume = volume.clamp(0.0, 1.0);
                 self.shared.set_target_gain(self.volume);
             }
+            Command::ReopenOutput => {
+                self.device = None;
+                self.check_output_device();
+            }
             Command::SetRepeat(mode) => self.repeat = mode,
             Command::SetShuffle(on) => {
                 self.shuffle = on;
@@ -468,6 +655,139 @@ impl Control {
         self.rng ^= self.rng << 25;
         self.rng ^= self.rng >> 27;
         self.rng.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+
+    /// Where the queue goes next, without moving there yet.
+    fn peek_next_cursor(&self) -> Option<usize> {
+        if self.order.is_empty() {
+            return None;
+        }
+        match self.repeat {
+            RepeatMode::One => Some(self.cursor),
+            _ => {
+                let next = self.cursor + 1;
+                if next < self.order.len() {
+                    Some(next)
+                } else if self.repeat == RepeatMode::All {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Open the next track and hand it to the decoder to run into the same ring.
+    ///
+    /// Only when it matches the open stream. Gapless and per-track rate
+    /// switching are mutually exclusive across a rate boundary, so a track at a
+    /// different rate or channel count gets an ordinary, gapped change instead.
+    fn preroll_next(&mut self) {
+        let Some(next_cursor) = self.peek_next_cursor() else {
+            let _ = self.decode_tx.send(DecodeCommand::NoFollowUp);
+            return;
+        };
+        let Some(index) = self.order.get(next_cursor).copied() else {
+            let _ = self.decode_tx.send(DecodeCommand::NoFollowUp);
+            return;
+        };
+        let Some(item) = self.queue.get(index).cloned() else {
+            let _ = self.decode_tx.send(DecodeCommand::NoFollowUp);
+            return;
+        };
+
+        let decoder = match TrackDecoder::open(Path::new(&item.path)) {
+            Ok(decoder) => decoder,
+            Err(_) => {
+                // Unreadable files are dealt with when we actually get there.
+                let _ = self.decode_tx.send(DecodeCommand::NoFollowUp);
+                return;
+            }
+        };
+        let format = decoder.format().clone();
+
+        let matches_stream = self
+            .stream
+            .as_ref()
+            .map(|stream| {
+                stream.info().sample_rate == format.sample_rate
+                    && stream.info().channels == format.channels
+            })
+            .unwrap_or(false);
+        if !matches_stream {
+            let _ = self.decode_tx.send(DecodeCommand::NoFollowUp);
+            return;
+        }
+
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.pending.push_back(PendingTrack {
+            seq,
+            cursor: next_cursor,
+            track_id: item.track_id,
+            duration_ms: format.duration().map(|d| d.as_millis() as u64).unwrap_or(0),
+            source: SourceSnapshot {
+                codec: format.codec.clone(),
+                sample_rate: format.sample_rate,
+                channels: format.channels,
+                bits_per_sample: format.bits_per_sample,
+            },
+        });
+        let _ = self.decode_tx.send(DecodeCommand::Preroll {
+            decoder: Box::new(decoder),
+            seq,
+        });
+    }
+
+    /// Has the listener actually crossed into a pre-rolled track yet?
+    ///
+    /// The callback publishes this, not the decoder, which is already up to
+    /// 150ms into the next track by the time the current one is still playing.
+    fn observe_boundary(&mut self) {
+        let seq = self.shared.boundary_seq();
+        if seq == self.seen_boundary {
+            return;
+        }
+        self.seen_boundary = seq;
+
+        while let Some(track) = self.pending.pop_front() {
+            if track.seq != seq {
+                continue;
+            }
+            self.finish_play();
+            self.cursor = track.cursor;
+            self.progress = Some(PlayProgress {
+                track_id: track.track_id,
+                furthest_ms: 0,
+                duration_ms: track.duration_ms,
+            });
+            if let Ok(mut state) = self.state.lock() {
+                state.track_id = Some(track.track_id);
+                state.duration_ms = track.duration_ms;
+                state.source = Some(track.source);
+                state.error = None;
+            }
+            break;
+        }
+    }
+
+    /// Bank what was heard of the current track.
+    fn finish_play(&mut self) {
+        let Some(progress) = self.progress.take() else {
+            return;
+        };
+        if progress.duration_ms == 0 && progress.furthest_ms == 0 {
+            return;
+        }
+        let completed = progress.duration_ms > 0
+            && progress.furthest_ms as f64 >= progress.duration_ms as f64 * COMPLETION_FRACTION;
+        if let Ok(mut plays) = self.plays.lock() {
+            plays.push(PlayEvent {
+                track_id: progress.track_id,
+                ms_played: progress.furthest_ms,
+                completed,
+            });
+        }
     }
 
     fn on_track_finished(&mut self) {
@@ -537,10 +857,14 @@ impl Control {
             None => true,
         };
 
+        // Anything pre-rolled is now irrelevant: we are jumping somewhere else.
+        self.pending.clear();
+        self.finish_play();
+
         let generation = self.shared.begin_seek(start_frames);
-        let producer = if needs_stream {
+        let sinks = if needs_stream {
             match self.open_stream(format.sample_rate, format.channels) {
-                Ok(producer) => Some(producer),
+                Ok(sinks) => Some(sinks),
                 Err(err) => {
                     self.set_error(Some(err));
                     return;
@@ -567,7 +891,7 @@ impl Control {
 
         let _ = self.decode_tx.send(DecodeCommand::Play {
             decoder: Box::new(decoder),
-            producer,
+            sinks,
             generation,
         });
 
@@ -581,6 +905,12 @@ impl Control {
         }
         self.shared.set_playing(true);
 
+        self.progress = Some(PlayProgress {
+            track_id: item.track_id,
+            furthest_ms: 0,
+            duration_ms,
+        });
+
         if let Ok(mut state) = self.state.lock() {
             state.track_id = Some(item.track_id);
             state.duration_ms = duration_ms;
@@ -589,7 +919,11 @@ impl Control {
         }
     }
 
-    fn open_stream(&mut self, sample_rate: u32, channels: u16) -> Result<Producer<f32>, String> {
+    fn open_stream(
+        &mut self,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<(Producer<f32>, Producer<Boundary>), String> {
         // Drop the old stream before opening a new one: two streams on the same
         // device is a good way to get neither.
         self.stream = None;
@@ -603,7 +937,8 @@ impl Control {
             }
         };
 
-        let (producer, renderer) = ring::open(sample_rate, channels, Arc::clone(&self.shared));
+        let (producer, boundaries, renderer) =
+            ring::open(sample_rate, channels, Arc::clone(&self.shared));
         let stream = self
             .backend
             .open(
@@ -614,6 +949,14 @@ impl Control {
                     buffer_frames: None,
                 },
                 Box::new(renderer),
+                {
+                    let flag = Arc::clone(&self.device_lost);
+                    Arc::new(move |err: AudioError| {
+                        if matches!(err, AudioError::DeviceLost) {
+                            flag.store(true, Ordering::Release);
+                        }
+                    })
+                },
             )
             .map_err(|e| e.to_string())?;
 
@@ -622,7 +965,7 @@ impl Control {
             state.device_sample_rate = Some(stream.info().sample_rate);
         }
         self.stream = Some(stream);
-        Ok(producer)
+        Ok((producer, boundaries))
     }
 
     /// Wait until the ring holds enough to survive the first few callbacks.
@@ -632,6 +975,90 @@ impl Control {
         let deadline = Instant::now() + PRIME_TIMEOUT;
         while self.shared.buffered_frames() < target && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Notice the output device moving or disappearing, and follow it.
+    ///
+    /// macOS changes the default output constantly: headphones out, interface
+    /// in, Bluetooth connects. A player that assumes one fixed device is wrong
+    /// within minutes of real use.
+    fn check_output_device(&mut self) {
+        let lost = self.device_lost.swap(false, Ordering::AcqRel);
+
+        self.device_check = self.device_check.wrapping_add(1);
+        let due = self.device_check % DEVICE_CHECK_TICKS == 0;
+        if !lost && !due && !self.awaiting_device {
+            return;
+        }
+
+        let default = self.backend.default_device().ok();
+        let moved = match (&self.device, &default) {
+            (Some(current), Some(now)) => current.id != now.id,
+            (Some(_), None) => true,
+            _ => false,
+        };
+
+        let forced = self.device.is_none() && self.stream.is_some();
+        if !lost && !moved && !forced && !self.awaiting_device {
+            return;
+        }
+        let Some(default) = default else {
+            // Nothing to play through at all. Pause and say so, rather than
+            // pretending to play into a device that is not there.
+            if !self.awaiting_device {
+                self.shared.set_playing(false);
+                self.awaiting_device = true;
+                self.set_error(Some("No output device available".into()));
+            }
+            return;
+        };
+
+        self.device = Some(default);
+        self.rebuild_output();
+    }
+
+    /// Move the running stream to the current default device.
+    ///
+    /// The open file and its position survive: only the ring and the stream are
+    /// rebuilt, so the gap is the device open plus a prime, not a track restart.
+    fn rebuild_output(&mut self) {
+        let Some(stream) = self.stream.as_ref() else {
+            self.awaiting_device = false;
+            return;
+        };
+        let rate = stream.info().sample_rate;
+        let channels = stream.info().channels;
+        let frames = self.shared.frames_played();
+        let was_playing = self.shared.is_playing() || self.awaiting_device;
+
+        // Anything pre-rolled belongs to the ring that is about to be replaced.
+        self.pending.clear();
+        let generation = self.shared.begin_seek(frames);
+
+        match self.open_stream(rate, channels) {
+            Ok(sinks) => {
+                let _ = self.decode_tx.send(DecodeCommand::Rebind {
+                    sinks,
+                    frames,
+                    generation,
+                });
+                self.await_prime(rate, channels);
+                if let Some(stream) = self.stream.as_mut() {
+                    let _ = stream.play();
+                }
+                self.shared.set_playing(was_playing);
+                self.awaiting_device = false;
+                self.set_error(None);
+            }
+            Err(err) => {
+                // Most often the new device will not take the track's sample
+                // rate. Without a resampler that is genuinely unplayable, so say
+                // so instead of playing something wrong.
+                self.shared.set_playing(false);
+                self.awaiting_device = true;
+                self.set_error(Some(format!("Output device unavailable: {err}")));
+            }
         }
     }
 
@@ -677,7 +1104,15 @@ impl Control {
         }
     }
 
-    fn publish(&self) {
+    fn publish(&mut self) {
+        // Furthest point reached, not wall clock: seeking back and forth must
+        // not inflate how much of a track counts as heard.
+        if let Some(progress) = self.progress.as_mut() {
+            progress.furthest_ms = progress.furthest_ms.max(
+                self.shared.frames_played() * 1000
+                    / self.sample_rate.load(Ordering::Relaxed).max(1) as u64,
+            );
+        }
         if let Ok(mut state) = self.state.lock() {
             state.playing = self.shared.is_playing();
             state.queue = self.queue.iter().map(|item| item.track_id).collect();

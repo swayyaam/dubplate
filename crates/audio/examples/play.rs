@@ -17,6 +17,9 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
+    let gapless = paths.iter().any(|p| p == "--gapless");
+    let paths: Vec<String> = paths.into_iter().filter(|p| p != "--gapless").collect();
+
     let engine = Engine::spawn();
     let items = paths
         .iter()
@@ -44,12 +47,31 @@ fn main() -> anyhow::Result<()> {
     }
     println!("duration    {:.1}s\n", state.duration_ms as f64 / 1000.0);
 
+    if gapless {
+        return watch_gapless(&engine);
+    }
+
     let started = Instant::now();
     watch(&engine, 2, "playing", started);
 
     println!("\n-- seek to 60s --");
     engine.send(Command::Seek { ms: 60_000 });
     watch(&engine, 2, "after seek", started);
+
+    println!("\n-- reopen output (the device-switch path) --");
+    let before = engine.snapshot();
+    engine.send(Command::ReopenOutput);
+    std::thread::sleep(Duration::from_millis(400));
+    let after = engine.snapshot();
+    println!(
+        "  position {:.2}s -> {:.2}s across the swap, playing {}, underruns {} -> {}",
+        before.position_ms as f64 / 1000.0,
+        after.position_ms as f64 / 1000.0,
+        after.playing,
+        before.underruns,
+        after.underruns
+    );
+    watch(&engine, 1, "after swap", started);
 
     println!("\n-- pause --");
     engine.send(Command::Pause);
@@ -114,4 +136,69 @@ fn watch(engine: &Engine, seconds: u64, label: &str, started: Instant) {
             started.elapsed().as_secs_f64(),
         );
     }
+}
+
+/// Park just before the end of the first track and watch the join.
+///
+/// The thing to see is the track id flipping while position restarts at zero,
+/// with the underrun count unchanged: audio ran straight through.
+fn watch_gapless(engine: &Engine) -> anyhow::Result<()> {
+    let state = engine.snapshot();
+    let lead_in = 6_000;
+    let target = state.duration_ms.saturating_sub(lead_in);
+    println!("-- seeking to {:.1}s, {:.0}s before the end --", target as f64 / 1000.0, lead_in as f64 / 1000.0);
+    engine.send(Command::Seek { ms: target });
+    std::thread::sleep(Duration::from_millis(300));
+
+    let before = engine.snapshot();
+    let mut last_track = before.track_id;
+    let underruns_before = before.underruns;
+    println!(
+        "   on track {:?}, {:.2}s / {:.2}s, underruns {}\n",
+        last_track,
+        before.position_ms as f64 / 1000.0,
+        before.duration_ms as f64 / 1000.0,
+        underruns_before
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut flipped_at: Option<(f64, Option<i64>)> = None;
+    let start = Instant::now();
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = engine.snapshot();
+        if now.track_id != last_track {
+            flipped_at = Some((start.elapsed().as_secs_f64(), now.track_id));
+            println!(
+                "   boundary crossed at wall {:.1}s -> track {:?}, position {:.2}s, underruns {}",
+                start.elapsed().as_secs_f64(),
+                now.track_id,
+                now.position_ms as f64 / 1000.0,
+                now.underruns
+            );
+            last_track = now.track_id;
+            break;
+        }
+    }
+
+    std::thread::sleep(Duration::from_secs(2));
+    let after = engine.snapshot();
+    println!(
+        "\n   two seconds later: track {:?}, position {:.2}s",
+        after.track_id,
+        after.position_ms as f64 / 1000.0
+    );
+    println!(
+        "   underruns {} -> {} ({:+})",
+        underruns_before,
+        after.underruns,
+        after.underruns as i64 - underruns_before as i64
+    );
+    match flipped_at {
+        Some(_) => println!("   gapless transition: OK"),
+        None => println!("   gapless transition: NEVER HAPPENED"),
+    }
+    engine.send(Command::Stop);
+    std::thread::sleep(Duration::from_millis(100));
+    Ok(())
 }

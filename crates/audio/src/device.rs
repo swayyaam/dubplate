@@ -17,6 +17,10 @@ pub enum AudioError {
     Unsupported(&'static str),
     #[error("output device error: {0}")]
     Device(String),
+    /// The device went away underneath a running stream: an interface
+    /// unplugged, headphones pulled, or the system default moved.
+    #[error("the output device is no longer available")]
+    DeviceLost,
 }
 
 pub type Result<T> = std::result::Result<T, AudioError>;
@@ -103,6 +107,12 @@ pub trait OutputStream {
     }
 }
 
+/// Where a stream reports failures that happen after it is open.
+///
+/// Called from a backend thread, so it must not block. The engine uses it to
+/// notice a device disappearing without polling for it.
+pub type ErrorSink = std::sync::Arc<dyn Fn(AudioError) + Send + Sync>;
+
 pub trait AudioBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn enumerate(&self) -> Result<Vec<DeviceInfo>>;
@@ -112,5 +122,6 @@ pub trait AudioBackend: Send + Sync {
         device: &DeviceId,
         request: StreamRequest,
         renderer: Box<dyn Renderer>,
+        on_error: ErrorSink,
     ) -> Result<Box<dyn OutputStream>>;
 }

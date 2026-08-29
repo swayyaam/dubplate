@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     let feeder = if direct {
         None
     } else {
-        let (mut producer, renderer) = ring::open(rate, channels, Arc::clone(&shared));
+        let (mut producer, _boundaries, renderer) = ring::open(rate, channels, Arc::clone(&shared));
         let stop_feeder = Arc::clone(&stop);
         // Stands in for the decode thread: keep the ring fed, never block the
         // callback, and back off when there is no room.
@@ -87,12 +87,17 @@ fn main() -> anyhow::Result<()> {
         buffer_frames: None,
     };
 
+    let complain: dubplate_audio::device::ErrorSink =
+        Arc::new(|err| eprintln!("stream error: {err}"));
     let mut stream = match feeder {
-        Some((_, renderer)) => backend.open(&device.id, request, Box::new(renderer))?,
+        Some((_, renderer)) => {
+            backend.open(&device.id, request, Box::new(renderer), complain)?
+        }
         None => backend.open(
             &device.id,
             request,
             Box::new(SineRenderer::new(FREQUENCY, rate, AMPLITUDE)),
+            complain,
         )?,
     };
 

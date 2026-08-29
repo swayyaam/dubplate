@@ -26,5 +26,5 @@ pub use device::{
     StreamRequest,
 };
 pub use gain::GainRamp;
-pub use ring::{ring_capacity_frames, PlaybackShared, RingRenderer};
+pub use ring::{ring_capacity_frames, Boundary, PlaybackShared, RingRenderer};
 pub use sine::SineRenderer;

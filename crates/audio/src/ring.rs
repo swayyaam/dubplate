@@ -17,6 +17,28 @@ pub fn ring_capacity_frames(sample_rate: u32) -> usize {
     (sample_rate as usize * RING_MS as usize).div_ceil(1000)
 }
 
+/// Room for a handful of queued track changes. Only one can be pending in
+/// practice, since the decoder pre-rolls exactly one track ahead.
+const BOUNDARY_SLOTS: usize = 8;
+
+/// Marks the frame where one track ends and the next begins inside the ring.
+///
+/// Gapless means both tracks' audio is already interleaved in the same buffer,
+/// so the moment playback crosses into the next track is a position in the
+/// ring, not an event the decoder can announce. Announcing it when the decoder
+/// switches would flip "now playing" up to 150ms early -- the length of the
+/// buffer still waiting to be heard.
+#[derive(Debug, Clone, Copy)]
+pub struct Boundary {
+    /// Ignored if it does not match the callback's generation: a seek
+    /// invalidates any boundary queued before it.
+    pub generation: u64,
+    /// Frames into this generation at which the new track starts.
+    pub at_frame: u64,
+    /// Matches the control thread's record of which track this is.
+    pub seq: u64,
+}
+
 /// State the control thread, the decoder and the audio callback all see.
 ///
 /// Every field is an atomic. The callback may never take a lock, so this is the
@@ -39,6 +61,8 @@ pub struct PlaybackShared {
     /// Frames sitting in the ring, published by the decode thread so the
     /// control thread can wait for a buffer before starting the device.
     buffered_frames: AtomicU64,
+    /// The most recent boundary the callback has actually played through.
+    boundary_seq: AtomicU64,
 }
 
 impl Default for PlaybackShared {
@@ -58,6 +82,7 @@ impl PlaybackShared {
             playing: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             buffered_frames: AtomicU64::new(0),
+            boundary_seq: AtomicU64::new(0),
         }
     }
 
@@ -117,6 +142,11 @@ impl PlaybackShared {
     pub fn buffered_frames(&self) -> u64 {
         self.buffered_frames.load(Ordering::Relaxed)
     }
+
+    /// The last gapless track change the listener has actually reached.
+    pub fn boundary_seq(&self) -> u64 {
+        self.boundary_seq.load(Ordering::Acquire)
+    }
 }
 
 /// Create the ring and the renderer that drains it.
@@ -124,9 +154,10 @@ pub fn open(
     sample_rate: u32,
     channels: u16,
     shared: Arc<PlaybackShared>,
-) -> (Producer<f32>, RingRenderer) {
+) -> (Producer<f32>, Producer<Boundary>, RingRenderer) {
     let capacity = ring_capacity_frames(sample_rate) * channels as usize;
     let (producer, consumer) = RingBuffer::<f32>::new(capacity);
+    let (boundary_tx, boundary_rx) = RingBuffer::<Boundary>::new(BOUNDARY_SLOTS);
     // A brand new ring is already in the state the generation-change path would
     // put it in: empty, and starting at the seek target. Say so explicitly.
     //
@@ -144,17 +175,30 @@ pub fn open(
 
     let renderer = RingRenderer {
         consumer,
+        boundary_rx,
+        next_boundary: None,
+        channels: channels.max(1) as usize,
+        consumed_frames: 0,
+        position: shared.seek_target_frames(),
         gain: GainRamp::new(0.0, sample_rate, RAMP_MS),
         local_generation: generation,
         shared,
     };
-    (producer, renderer)
+    (producer, boundary_tx, renderer)
 }
 
 /// Drains the ring, applies the gain ramp, and reports position. This runs on
 /// the realtime thread and does nothing else.
 pub struct RingRenderer {
     consumer: Consumer<f32>,
+    boundary_rx: Consumer<Boundary>,
+    next_boundary: Option<Boundary>,
+    channels: usize,
+    /// Frames taken from the ring in this generation, including discarded ones,
+    /// so it stays aligned with the decoder's count of frames written.
+    consumed_frames: u64,
+    /// Position within the track currently being heard.
+    position: u64,
     shared: Arc<PlaybackShared>,
     gain: GainRamp,
     local_generation: u64,
@@ -170,20 +214,41 @@ impl RingRenderer {
             }
         }
     }
+
+    /// Take the next boundary belonging to the current generation, dropping any
+    /// left over from before a seek.
+    fn take_boundary(&mut self) {
+        while self.next_boundary.is_none() {
+            match self.boundary_rx.pop() {
+                Ok(boundary) if boundary.generation == self.local_generation => {
+                    self.next_boundary = Some(boundary)
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 impl Renderer for RingRenderer {
     fn render(&mut self, output: &mut [f32], channels: u16) {
         let channels = channels.max(1) as usize;
+        self.channels = channels;
 
-        // A seek happened. Everything queued predates it, so it goes.
+        // A seek happened. Everything queued predates it, so it goes -- and the
+        // frame counters on both sides restart from zero together, which is what
+        // keeps boundary positions meaningful.
         let generation = self.shared.generation();
         if generation != self.local_generation {
             self.discard_all();
             self.local_generation = generation;
+            self.consumed_frames = 0;
+            self.position = self.shared.seek_target_frames();
+            self.next_boundary = None;
+            while self.boundary_rx.pop().is_ok() {}
             self.shared
                 .frames_played
-                .store(self.shared.seek_target_frames(), Ordering::Relaxed);
+                .store(self.position, Ordering::Relaxed);
             // Only now may the decoder write for this generation.
             self.shared
                 .drained_generation
@@ -200,6 +265,12 @@ impl Renderer for RingRenderer {
             return;
         }
 
+        // Fetched before the ring is borrowed below. At most one track change
+        // can fall inside one device buffer, which is a few milliseconds.
+        self.take_boundary();
+        let boundary = self.next_boundary;
+        let mut crossed = None;
+
         let frames_wanted = output.len() / channels;
         let frames_available = self.consumer.slots() / channels;
         let frames = frames_wanted.min(frames_available);
@@ -210,15 +281,30 @@ impl Renderer for RingRenderer {
                 let (first, second) = chunk.as_slices();
                 let mut source = first.iter().chain(second.iter());
                 for _ in 0..frames {
+                    if let Some(boundary) = boundary {
+                        if self.consumed_frames == boundary.at_frame {
+                            // This frame is the first of the next track, and it
+                            // is being heard now rather than merely decoded.
+                            self.position = 0;
+                            crossed = Some(boundary.seq);
+                        }
+                    }
                     let gain = self.gain.next(target);
                     for _ in 0..channels {
                         let sample = source.next().copied().unwrap_or(0.0);
                         output[written] = sample * gain;
                         written += 1;
                     }
+                    self.consumed_frames += 1;
+                    self.position += 1;
                 }
                 chunk.commit_all();
             }
+        }
+
+        if let Some(seq) = crossed {
+            self.next_boundary = None;
+            self.shared.boundary_seq.store(seq, Ordering::Release);
         }
 
         if written < output.len() {
@@ -229,10 +315,8 @@ impl Renderer for RingRenderer {
             }
         }
 
-        if frames > 0 {
-            self.shared
-                .frames_played
-                .fetch_add(frames as u64, Ordering::Relaxed);
-        }
+        self.shared
+            .frames_played
+            .store(self.position, Ordering::Relaxed);
     }
 }

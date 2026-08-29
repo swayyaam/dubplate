@@ -355,6 +355,15 @@ button, input { font: inherit; color: inherit; }
 }
 .chip__spec { color: var(--text-faint); font-weight: 500; font-variant-numeric: tabular-nums; }
 .chip--converted { background: var(--accent-soft); color: var(--accent); }
+.chip--error {
+  background: rgba(226, 104, 92, 0.14);
+  color: var(--danger);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip--warn { background: var(--accent-soft); color: var(--accent); }
 .chip--converted .chip__spec { color: var(--accent); opacity: 0.7; }
 
 .volume {

@@ -12,8 +12,20 @@ const RAMP_FRAMES: usize = 480;
 
 fn setup() -> (rtrb::Producer<f32>, ring::RingRenderer, Arc<PlaybackShared>) {
     let shared = Arc::new(PlaybackShared::new());
-    let (producer, renderer) = ring::open(RATE, CHANNELS, Arc::clone(&shared));
+    let (producer, _boundaries, renderer) = ring::open(RATE, CHANNELS, Arc::clone(&shared));
     (producer, renderer, shared)
+}
+
+/// Same, but keeping the boundary producer so gapless transitions can be driven.
+fn setup_with_boundaries() -> (
+    rtrb::Producer<f32>,
+    rtrb::Producer<ring::Boundary>,
+    ring::RingRenderer,
+    Arc<PlaybackShared>,
+) {
+    let shared = Arc::new(PlaybackShared::new());
+    let (producer, boundaries, renderer) = ring::open(RATE, CHANNELS, Arc::clone(&shared));
+    (producer, boundaries, renderer, shared)
 }
 
 fn push_frames(producer: &mut rtrb::Producer<f32>, frames: usize, value: f32) -> usize {
@@ -221,4 +233,101 @@ fn gain_of_zero_is_silence_without_stalling_playback() {
     assert!(output.iter().all(|s| s.abs() < 1e-6), "muted output");
     // Muted is not paused: the track keeps moving.
     assert_eq!(shared.frames_played(), 1000);
+}
+
+#[test]
+fn a_gapless_boundary_flips_exactly_when_it_is_heard() {
+    let (mut producer, mut boundaries, mut renderer, shared) = setup_with_boundaries();
+    shared.set_playing(true);
+    shared.set_target_gain(1.0);
+
+    // Two tracks already interleaved in one ring, which is what gapless means.
+    push_frames(&mut producer, 500, 0.5);
+    push_frames(&mut producer, 500, -0.5);
+    boundaries
+        .push(ring::Boundary {
+            generation: shared.generation(),
+            at_frame: 500,
+            seq: 7,
+        })
+        .unwrap();
+
+    // Still inside the first track.
+    let mut output = buffer(300);
+    renderer.render(&mut output, CHANNELS);
+    assert_eq!(shared.boundary_seq(), 0, "not reached yet");
+    assert_eq!(shared.frames_played(), 300);
+
+    // Cross it.
+    let mut output = buffer(400);
+    renderer.render(&mut output, CHANNELS);
+    assert_eq!(
+        shared.boundary_seq(),
+        7,
+        "the flip happens when the listener arrives, not when the decoder did"
+    );
+    // Position restarted at the new track: 700 rendered, 500 belonged to the old one.
+    assert_eq!(shared.frames_played(), 200);
+}
+
+#[test]
+fn audio_runs_straight_through_a_boundary_without_a_gap() {
+    let (mut producer, mut boundaries, mut renderer, shared) = setup_with_boundaries();
+    shared.set_playing(true);
+    shared.set_target_gain(1.0);
+
+    // Settle the gain ramp first so the assertion is about the boundary alone.
+    push_frames(&mut producer, RAMP_FRAMES, 1.0);
+    let mut warmup = buffer(RAMP_FRAMES);
+    renderer.render(&mut warmup, CHANNELS);
+
+    push_frames(&mut producer, 200, 1.0);
+    push_frames(&mut producer, 200, -1.0);
+    boundaries
+        .push(ring::Boundary {
+            generation: shared.generation(),
+            at_frame: (RAMP_FRAMES + 200) as u64,
+            seq: 3,
+        })
+        .unwrap();
+
+    let mut output = buffer(400);
+    renderer.render(&mut output, CHANNELS);
+
+    // Full scale either side, and nothing muted or dropped in between: a gap
+    // would show up as zeroes around the crossover.
+    assert!(output[10] > 0.99, "before the boundary: {}", output[10]);
+    assert!(output[399 * 2] < -0.99, "after the boundary: {}", output[399 * 2]);
+    assert!(
+        output.iter().all(|sample| sample.abs() > 0.99),
+        "no silence anywhere across the join"
+    );
+    assert_eq!(shared.underruns(), 0);
+}
+
+#[test]
+fn a_seek_cancels_a_boundary_queued_before_it() {
+    let (mut producer, mut boundaries, mut renderer, shared) = setup_with_boundaries();
+    shared.set_playing(true);
+    push_frames(&mut producer, 1000, 1.0);
+    boundaries
+        .push(ring::Boundary {
+            generation: shared.generation(),
+            at_frame: 500,
+            seq: 9,
+        })
+        .unwrap();
+
+    // The user seeks. The queued boundary describes a position we have left.
+    shared.begin_seek(10 * RATE as u64);
+    let mut output = buffer(600);
+    renderer.render(&mut output, CHANNELS);
+    push_frames(&mut producer, 1000, 1.0);
+    renderer.render(&mut output, CHANNELS);
+
+    assert_eq!(
+        shared.boundary_seq(),
+        0,
+        "a stale boundary must never flip the now-playing track"
+    );
 }

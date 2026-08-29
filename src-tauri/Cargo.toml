@@ -24,3 +24,4 @@ tauri-plugin-opener = "2"
 serde.workspace      = true
 serde_json.workspace = true
 dubplate-audio = { version = "0.1.0", path = "../crates/audio" }
+souvlaki = "0.8.3"

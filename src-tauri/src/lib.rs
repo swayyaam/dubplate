@@ -2,9 +2,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use dubplate_audio::engine::{Command, Engine, PlayerState, QueueItem, RepeatMode};
+use dubplate_audio::engine::{Command, Engine, PlayEvent, PlayerState, QueueItem, RepeatMode};
+use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
-use dubplate_library::{index, query, watch, Library, LibraryWatcher, SyncReport, TrackRow};
+use dubplate_library::{
+    history, index, query, watch, Library, LibraryWatcher, Listen, SyncReport, TrackRow,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -16,6 +19,9 @@ const PLAYBACK_KEY: &str = "playback";
 /// How often playback state is written back. Often enough that a crash loses
 /// seconds, rarely enough that it is not writing during every frame.
 const SAVE_INTERVAL: Duration = Duration::from_secs(3);
+/// The housekeeping tick: drain finished listens, refresh the macOS Now Playing
+/// panel, and every few ticks write playback state back.
+const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 
 struct AppState {
     library: Mutex<Library>,
@@ -200,6 +206,37 @@ fn set_shuffle(state: State<'_, Arc<AppState>>, shuffle: bool) {
     state.engine.send(Command::SetShuffle(shuffle));
 }
 
+/// Bank what was actually listened to.
+///
+/// Play counts live in the database rather than in tags, so nothing dubplate
+/// does writes to the user's files.
+fn record_plays(state: &Arc<AppState>, events: &[PlayEvent]) {
+    if events.is_empty() {
+        return;
+    }
+    let listens: Vec<Listen> = events
+        .iter()
+        .map(|event| Listen {
+            track_id: event.track_id,
+            ms_played: event.ms_played,
+            completed: event.completed,
+        })
+        .collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    if let Ok(mut library) = state.library.lock() {
+        let _ = history::record(&mut library, &listens, now);
+    }
+}
+
+fn now_playing_metadata(state: &Arc<AppState>, track_id: i64) -> Option<(String, String, String)> {
+    let library = state.library.lock().ok()?;
+    history::summary(&library, track_id)
+}
+
 /// Turn track ids into playable queue items, keeping the caller's order and
 /// silently dropping anything the index no longer knows about.
 fn resolve_queue(state: &Arc<AppState>, track_ids: &[i64]) -> Fallible<Vec<QueueItem>> {
@@ -364,12 +401,90 @@ pub fn run() {
 
             restore_playback(&state);
 
-            // Write playback back periodically rather than on every change: the
-            // position moves 30 times a second and the queue almost never does.
-            let saver = Arc::clone(&state);
-            std::thread::spawn(move || loop {
-                std::thread::sleep(SAVE_INTERVAL);
-                save_playback(&saver);
+            // Media keys and the macOS Now Playing panel. souvlaki dispatches to
+            // the main queue itself, so this needs no window handle and no
+            // special thread.
+            let mut media = MediaControls::new(PlatformConfig {
+                display_name: "dubplate",
+                dbus_name: "dubplate",
+                hwnd: None,
+            })
+            .ok();
+            if let Some(controls) = media.as_mut() {
+                let engine_state = Arc::clone(&state);
+                let _ = controls.attach(move |event| {
+                    let engine = &engine_state.engine;
+                    match event {
+                        MediaControlEvent::Play => engine.send(Command::Play),
+                        MediaControlEvent::Pause => engine.send(Command::Pause),
+                        MediaControlEvent::Toggle => engine.send(Command::TogglePlay),
+                        MediaControlEvent::Next => engine.send(Command::Next),
+                        MediaControlEvent::Previous => engine.send(Command::Previous),
+                        MediaControlEvent::Stop => engine.send(Command::Stop),
+                        MediaControlEvent::SetPosition(position) => engine.send(Command::Seek {
+                            ms: position.0.as_millis() as u64,
+                        }),
+                        MediaControlEvent::SetVolume(volume) => {
+                            engine.send(Command::SetVolume(volume as f32))
+                        }
+                        // Seek by relative amounts and the rest are not wired up
+                        // yet; ignoring them is better than guessing.
+                        _ => {}
+                    }
+                });
+            }
+
+            // One housekeeping thread: bank finished listens, keep Now Playing
+            // in step, and write playback state back every few ticks. Position
+            // moves thirty times a second and the queue almost never does, so
+            // none of this belongs on the hot path.
+            let keeper = Arc::clone(&state);
+            std::thread::spawn(move || {
+                let mut controls = media;
+                let mut last_track: Option<i64> = None;
+                let mut last_playing = false;
+                let mut ticks = 0u32;
+
+                loop {
+                    std::thread::sleep(HOUSEKEEPING_INTERVAL);
+                    ticks += 1;
+
+                    record_plays(&keeper, &keeper.engine.take_play_events());
+
+                    let snapshot = keeper.engine.snapshot();
+                    if let Some(controls) = controls.as_mut() {
+                        if snapshot.track_id != last_track {
+                            last_track = snapshot.track_id;
+                            if let Some(id) = snapshot.track_id {
+                                if let Some((title, artist, album)) =
+                                    now_playing_metadata(&keeper, id)
+                                {
+                                    let _ = controls.set_metadata(MediaMetadata {
+                                        title: Some(&title),
+                                        artist: Some(&artist),
+                                        album: Some(&album),
+                                        duration: Some(Duration::from_millis(
+                                            snapshot.duration_ms,
+                                        )),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+                        if snapshot.playing != last_playing || snapshot.track_id != last_track {
+                            last_playing = snapshot.playing;
+                            let _ = controls.set_playback(if snapshot.playing {
+                                MediaPlayback::Playing { progress: None }
+                            } else {
+                                MediaPlayback::Paused { progress: None }
+                            });
+                        }
+                    }
+
+                    if ticks % (SAVE_INTERVAL.as_secs().max(1) as u32) == 0 {
+                        save_playback(&keeper);
+                    }
+                }
             });
 
             app.manage(state);
