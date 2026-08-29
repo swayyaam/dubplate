@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { TrackRow } from "../types";
+import type { FlowStep, TrackRow } from "../types";
 import { Cover } from "../components/Cover";
 import { Waveform } from "../components/Waveform";
 import { formatDuration, formatKhz, trackArtist, trackTitle } from "../lib/format";
@@ -11,17 +11,19 @@ interface Props {
   trackById: Map<number, TrackRow>;
   /** The verdict badge is the way into the signal path, as the doc specifies. */
   onOpenSignal: () => void;
+  onOpenQueue: () => void;
 }
 
 /**
  * Large art, the track, a waveform seek bar, and what the output is actually
  * doing. Everything else is chrome and stays out.
  */
-export function NowPlayingView({ trackById, onOpenSignal }: Props) {
+export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) {
   const state = usePlayer();
   const trackId = state?.trackId ?? null;
   const [peaks, setPeaks] = useState<number[] | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
+  const [building, setBuilding] = useState(false);
 
   useEffect(() => {
     if (trackId === null) {
@@ -81,6 +83,28 @@ export function NowPlayingView({ trackById, onOpenSignal }: Props) {
           <span>{formatDuration(state.durationMs)}</span>
         </div>
       </div>
+
+      {/* Tempo, key and loudness were all measured by the analysis pass, so a
+          set that mixes can be built out of them. */}
+      <button
+        className="button"
+        disabled={building}
+        onClick={() => {
+          setBuilding(true);
+          void invoke<FlowStep[]>("build_set", { trackId, length: 20 })
+            .then((steps) => {
+              if (steps.length < 2) return;
+              return invoke("play_tracks", {
+                trackIds: steps.map((step) => step.track.id),
+                start: 0,
+              }).then(onOpenQueue);
+            })
+            .finally(() => setBuilding(false));
+        }}
+        title="Queue tracks that mix with this one: close in tempo, one step around the Camelot wheel"
+      >
+        {building ? "Building…" : "Build a set from here"}
+      </button>
 
       {/* The verdict, and the way into the full four-block readout. Green only
           when nothing altered the audio and the hardware really is at the

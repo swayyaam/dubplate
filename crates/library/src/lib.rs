@@ -8,6 +8,7 @@
 
 pub mod artwork;
 pub mod db;
+pub mod flow;
 pub mod health;
 pub mod history;
 pub mod index;
@@ -19,6 +20,7 @@ pub mod watch;
 
 pub use artwork::{ArtworkCache, ArtworkReport};
 pub use db::Library;
+pub use flow::{build_set, FlowStep};
 pub use health::{CollectionHealth, SUSPECT_THRESHOLD};
 pub use history::Listen;
 pub use index::{sync, SyncReport};

@@ -181,10 +181,28 @@ export default function App() {
       })),
       { id: "signal", label: "Show signal path", run: () => goTo("signal") },
       { id: "analyse", label: "Analyse library", run: () => void invoke("start_analysis") },
+      {
+        id: "flow",
+        label: "Build a set from the playing track",
+        hint: "tempo and key",
+        run: () => {
+          if (playingId === null) return;
+          void invoke<{ track: TrackRow }[]>("build_set", { trackId: playingId, length: 20 })
+            .then((steps) =>
+              steps.length > 1
+                ? invoke("play_tracks", {
+                    trackIds: steps.map((step) => step.track.id),
+                    start: 0,
+                  }).then(() => goTo("queue"))
+                : undefined,
+            )
+            .catch((err) => setError(String(err)));
+        },
+      },
       { id: "rescan", label: "Rescan library", run: () => void rescan() },
       { id: "folder", label: "Change music folder", run: () => void chooseFolder() },
     ],
-    [isPlaying, goTo, rescan, chooseFolder],
+    [isPlaying, goTo, rescan, chooseFolder, playingId],
   );
 
   useEffect(() => {
@@ -340,7 +358,11 @@ export default function App() {
         )}
 
         {hasLibrary && view === "playing" && (
-          <NowPlayingView trackById={trackById} onOpenSignal={() => goTo("signal")} />
+          <NowPlayingView
+            trackById={trackById}
+            onOpenSignal={() => goTo("signal")}
+            onOpenQueue={() => goTo("queue")}
+          />
         )}
         {hasLibrary && view === "signal" && <SignalPathView onBack={() => goTo("playing")} />}
         {hasLibrary && view === "health" && <HealthView onPlay={playFrom} />}

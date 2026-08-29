@@ -192,7 +192,9 @@ fn pipeline_run(root: &Path) -> anyhow::Result<()> {
     use dubplate_analysis::{pipeline, PeaksCache};
     use dubplate_library::{index, Library};
 
-    let work = std::env::temp_dir().join(format!("dubplate-analysis-{}", std::process::id()));
+    // Stable rather than per-process: running this twice should demonstrate
+    // resumability rather than redoing everything.
+    let work = std::env::temp_dir().join("dubplate-analysis-workdir");
     std::fs::create_dir_all(&work)?;
     let mut library = Library::open(work.join("library.sqlite"))?;
     let peaks = PeaksCache::new(work.join("waveforms"));
@@ -270,6 +272,34 @@ fn pipeline_run(root: &Path) -> anyhow::Result<()> {
             let tracks = dubplate_library::query::list_tracks(&library)?;
             std::fs::write(dir.join("dev-tracks.json"), serde_json::to_string(&tracks)?)?;
             println!("wrote fixtures   {}", dir.display());
+        }
+    }
+
+    // A set built from the most-played track, which is what the data is for.
+    let seed: Option<i64> = library
+        .connection()
+        .query_row(
+            "SELECT id FROM tracks WHERE bpm IS NOT NULL AND music_key IS NOT NULL
+             ORDER BY duration_ms DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(seed) = seed {
+        println!("\n== a set that flows from this track ==");
+        for (index, step) in dubplate_library::flow::build_set(&library, seed, 10)?.iter().enumerate() {
+            println!(
+                "{:>2}. {:<52} {}",
+                index + 1,
+                step.track
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| step.track.file_name.clone())
+                    .chars()
+                    .take(52)
+                    .collect::<String>(),
+                step.reason
+            );
         }
     }
     Ok(())

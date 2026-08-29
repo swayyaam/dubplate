@@ -10,8 +10,8 @@ use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, P
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
 use dubplate_analysis::{pipeline, PeaksCache};
 use dubplate_library::{
-    health, history, index, query, watch, AlbumRow, CollectionHealth, Library, LibraryWatcher,
-    Listen, SyncReport, TrackRow,
+    flow, health, history, index, query, watch, AlbumRow, CollectionHealth, FlowStep, Library,
+    LibraryWatcher, Listen, SyncReport, TrackRow,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -410,6 +410,23 @@ fn run_analysis(app: &AppHandle, state: &Arc<AppState>) {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
+}
+
+/// Build a set that flows from one track, using the tempo, key and loudness the
+/// analysis pass measured.
+#[tauri::command]
+async fn build_set(
+    state: State<'_, Arc<AppState>>,
+    track_id: i64,
+    length: usize,
+) -> Fallible<Vec<FlowStep>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library.lock().map_err(to_error)?;
+        flow::build_set(&library, track_id, length.clamp(2, 100)).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
 }
 
 #[tauri::command]
@@ -850,7 +867,8 @@ pub fn run() {
             analysis_status,
             start_analysis,
             collection_health,
-            health_tracks
+            health_tracks,
+            build_set
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

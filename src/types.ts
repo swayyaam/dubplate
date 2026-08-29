@@ -202,6 +202,12 @@ export interface CollectionHealth {
   bitDepths: Bucket[];
 }
 
+/** One track in a generated set, and why it follows the last. */
+export interface FlowStep {
+  track: TrackRow;
+  reason: string;
+}
+
 export interface AnalysisStatus {
   remaining: number;
   total: number;
