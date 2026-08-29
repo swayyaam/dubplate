@@ -26,6 +26,21 @@ export interface TrackRow {
   channels: number | null;
   bitrate: number | null;
 
+  /** Bits the audio actually uses; below `bitDepth` means a padded container. */
+  effectiveBits: number | null;
+  /** Highest frequency carrying real energy, in Hz. */
+  spectralCutoff: number | null;
+  /** 0-1 suspicion that a lossless container holds lossy audio. Never a verdict. */
+  transcodeScore: number | null;
+  bpm: number | null;
+  /** Camelot notation, e.g. "8A". */
+  musicKey: string | null;
+  analyzedAt: number | null;
+
+  /** ReplayGain in dB, from tags or from the analysis pass. */
+  replayGainDb: number | null;
+  replayGainPeak: number | null;
+
   /** Key into the artwork cache, or null if the album has no cover. */
   artHash: string | null;
   playCount: number;
@@ -163,4 +178,48 @@ export interface AlbumRow {
   lossless: boolean;
 }
 
-export type View = "albums" | "tracks" | "album" | "playing" | "queue" | "signal";
+export interface Bucket {
+  label: string;
+  count: number;
+  bytes: number;
+}
+
+export interface CollectionHealth {
+  total: number;
+  analysed: number;
+  lossless: number;
+  lossy: number;
+  /** MP4 containers whose codec has not been resolved yet. */
+  unknown: number;
+  /** A bigger container than the audio needs. */
+  padded: number;
+  /** Lossless containers whose spectrum suggests a lossy origin. */
+  suspected: number;
+  totalBytes: number;
+  totalDurationMs: number;
+  codecs: Bucket[];
+  sampleRates: Bucket[];
+  bitDepths: Bucket[];
+}
+
+export interface AnalysisStatus {
+  remaining: number;
+  total: number;
+  running: boolean;
+}
+
+export interface BatchReport {
+  analysed: number;
+  failed: number;
+  remaining: number;
+  elapsedMs: number;
+}
+
+export type View =
+  | "albums"
+  | "tracks"
+  | "album"
+  | "playing"
+  | "queue"
+  | "signal"
+  | "health";

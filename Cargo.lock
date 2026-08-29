@@ -1336,6 +1336,7 @@ dependencies = [
  "rusqlite",
  "rustfft",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]

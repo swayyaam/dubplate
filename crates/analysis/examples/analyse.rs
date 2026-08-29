@@ -260,5 +260,17 @@ fn pipeline_run(root: &Path) -> anyhow::Result<()> {
         .unwrap_or(0);
     println!("\nwaveforms cached {waveforms}");
     println!("workdir          {}", work.display());
+
+    // Optional fixture dump, so the interface can be looked at with real
+    // numbers rather than invented ones.
+    if let Some(out) = std::env::args().nth(3).filter(|a| !a.starts_with('-')) {
+        let dir = PathBuf::from(expand(&out));
+        if dir.is_dir() {
+            std::fs::write(dir.join("dev-health.json"), serde_json::to_string(&health)?)?;
+            let tracks = dubplate_library::query::list_tracks(&library)?;
+            std::fs::write(dir.join("dev-tracks.json"), serde_json::to_string(&tracks)?)?;
+            println!("wrote fixtures   {}", dir.display());
+        }
+    }
     Ok(())
 }
