@@ -9,13 +9,15 @@ import { loadWaveform, peekWaveform } from "../lib/waveforms";
 
 interface Props {
   trackById: Map<number, TrackRow>;
+  /** The verdict badge is the way into the signal path, as the doc specifies. */
+  onOpenSignal: () => void;
 }
 
 /**
  * Large art, the track, a waveform seek bar, and what the output is actually
  * doing. Everything else is chrome and stays out.
  */
-export function NowPlayingView({ trackById }: Props) {
+export function NowPlayingView({ trackById, onOpenSignal }: Props) {
   const state = usePlayer();
   const trackId = state?.trackId ?? null;
   const [peaks, setPeaks] = useState<number[] | null>(null);
@@ -80,37 +82,35 @@ export function NowPlayingView({ trackById }: Props) {
         </div>
       </div>
 
-      {/* A first sketch of the signal path readout. Phase 5 turns this into the
-          full four-block panel with the device format read back rather than
-          assumed. */}
-      <dl className="signal">
-        <div>
-          <dt>Source</dt>
-          <dd>
-            {state.source
-              ? `${state.source.codec.toUpperCase()} · ${formatKhz(state.source.sampleRate)} kHz · ${
-                  state.source.bitsPerSample
-                    ? `${state.source.bitsPerSample} bit`
-                    : "no bit depth"
-                } · ${state.source.channels} ch`
-              : "—"}
-          </dd>
-        </div>
-        <div>
-          <dt>Output</dt>
-          <dd>
-            {state.device ?? "—"}
-            {state.deviceSampleRate ? ` · ${formatKhz(state.deviceSampleRate)} kHz` : ""}
-            {" · shared"}
-          </dd>
-        </div>
-        <div>
-          <dt>Dropouts</dt>
-          <dd className={state.underruns > 0 ? "signal--warn" : undefined}>
-            {state.underruns}
-          </dd>
-        </div>
-      </dl>
+      {/* The verdict, and the way into the full four-block readout. Green only
+          when nothing altered the audio and the hardware really is at the
+          file's rate -- read back from the device, not assumed. */}
+      {state.signal && (
+        <button
+          className={`verdict verdict--button ${
+            state.signal.bitPerfect ? "verdict--perfect" : "verdict--altered"
+          }`}
+          onClick={onOpenSignal}
+          title="Show the full signal path"
+        >
+          <span className="verdict__badge">
+            {state.signal.bitPerfect
+              ? "bit-perfect"
+              : `altered, ${state.signal.alteredStages} stage${
+                  state.signal.alteredStages === 1 ? "" : "s"
+                }`}
+          </span>
+          <span className="verdict__reason">
+            {state.signal.deviceName ?? "—"}
+            {state.signal.deviceFormat
+              ? ` · ${formatKhz(state.signal.deviceFormat.sampleRate)} kHz · ${
+                  state.signal.deviceFormat.sampleFormat
+                }`
+              : " · format unknown"}
+            {state.signal.exclusive ? " · exclusive" : " · shared"}
+          </span>
+        </button>
+      )}
     </div>
   );
 }

@@ -82,6 +82,48 @@ export interface SourceSnapshot {
   bitsPerSample: number | null;
 }
 
+/** One thing that could have altered the audio on its way out. */
+export interface Stage {
+  name: string;
+  /** False renders grey. Three inactive lines is the point of the block. */
+  active: boolean;
+  detail: string | null;
+}
+
+export interface DeviceFormatView {
+  sampleRate: number;
+  bitsPerChannel: number;
+  channels: number;
+  /** s16, s24, s32, f32 — 32-bit int and 32-bit float are different things. */
+  sampleFormat: string;
+}
+
+export interface SignalPath {
+  source: SourceSnapshot;
+  /** What came out of Symphonia, before any conversion. */
+  decoderSampleRate: number;
+  decoderFormat: string;
+  processing: Stage[];
+  deviceName: string | null;
+  /** Read back from the hardware. Null means it would not say. */
+  deviceFormat: DeviceFormatView | null;
+  exclusive: boolean;
+  bitPerfect: boolean;
+  alteredStages: number;
+  reason: string | null;
+}
+
+export type RateMode =
+  | { mode: "followFile" }
+  | { mode: "fixed"; rate: number }
+  | { mode: "followAlbum" };
+
+export interface OutputSettings {
+  exclusive: boolean;
+  rateMode: RateMode;
+  replayGain: boolean;
+}
+
 export interface PlayerState {
   playing: boolean;
   trackId: number | null;
@@ -99,6 +141,10 @@ export interface PlayerState {
   /** Non-zero means the decoder fell behind and the device ran dry. */
   underruns: number;
   error: string | null;
+  settings: OutputSettings;
+  signal: SignalPath | null;
+  /** Rates the current device will accept. */
+  deviceRates: number[];
 }
 
 export interface AlbumRow {
@@ -117,4 +163,4 @@ export interface AlbumRow {
   lossless: boolean;
 }
 
-export type View = "albums" | "tracks" | "album" | "playing" | "queue";
+export type View = "albums" | "tracks" | "album" | "playing" | "queue" | "signal";

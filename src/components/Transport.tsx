@@ -10,6 +10,7 @@ import { Waveform } from "./Waveform";
 interface Props {
   trackById: Map<number, TrackRow>;
   onOpenNowPlaying: () => void;
+  onOpenSignal: () => void;
 }
 
 /**
@@ -17,7 +18,11 @@ interface Props {
  * the audio callback's frame counter at 30fps -- never the decoder, which runs
  * ahead by whatever the ring holds.
  */
-export const Transport = memo(function Transport({ trackById, onOpenNowPlaying }: Props) {
+export const Transport = memo(function Transport({
+  trackById,
+  onOpenNowPlaying,
+  onOpenSignal,
+}: Props) {
   const state = usePlayer();
   const trackId = state?.trackId ?? null;
   const [peaks, setPeaks] = useState<number[] | null>(null);
@@ -103,7 +108,7 @@ export const Transport = memo(function Transport({ trackById, onOpenNowPlaying }
             {state.underruns} dropouts
           </span>
         )}
-        {state.source && <SignalChip state={state} />}
+        {state.source && <SignalChip state={state} onOpen={onOpenSignal} />}
         <button
           className={`icon${state.shuffle ? " icon--on" : ""}`}
           title="Shuffle"
@@ -139,26 +144,40 @@ export const Transport = memo(function Transport({ trackById, onOpenNowPlaying }
  * signal path readout: when the device rate differs from the file's, something
  * resampled, and phase 5 will say so properly.
  */
-function SignalChip({ state }: { state: PlayerState }) {
+/**
+ * Codec and rate, plus the verdict as a colour.
+ *
+ * Green means the hardware is genuinely running at the file's rate with nothing
+ * in between; amber means something altered the audio. The device format behind
+ * that judgement is read back from CoreAudio, not assumed from what we asked
+ * for.
+ */
+function SignalChip({ state, onOpen }: { state: PlayerState; onOpen: () => void }) {
   const source = state.source!;
-  const converted =
-    state.deviceSampleRate !== null && state.deviceSampleRate !== source.sampleRate;
+  const signal = state.signal;
   const spec = source.bitsPerSample
     ? `${source.bitsPerSample}/${formatKhz(source.sampleRate)}`
     : formatKhz(source.sampleRate);
+
   const detail = [
     `${source.codec.toUpperCase()} ${source.sampleRate} Hz`,
     source.bitsPerSample ? `${source.bitsPerSample} bit` : "no bit depth (lossy codec)",
-    state.device ?? "unknown device",
-    state.deviceSampleRate ? `device at ${state.deviceSampleRate} Hz` : "",
+    signal?.deviceName ?? state.device ?? "unknown device",
+    signal?.deviceFormat
+      ? `device at ${signal.deviceFormat.sampleRate} Hz ${signal.deviceFormat.sampleFormat}`
+      : "device format unknown",
+    signal?.exclusive ? "exclusive" : "shared",
+    signal ? (signal.bitPerfect ? "bit-perfect" : (signal.reason ?? "altered")) : "",
   ]
     .filter(Boolean)
     .join(" · ");
 
+  const tone = signal ? (signal.bitPerfect ? " chip--perfect" : " chip--converted") : "";
+
   return (
-    <span className={`chip${converted ? " chip--converted" : ""}`} title={detail}>
+    <button className={`chip chip--button${tone}`} title={detail} onClick={onOpen}>
       {source.codec.toUpperCase()} <span className="chip__spec">{spec}</span>
-    </span>
+    </button>
   );
 }
 

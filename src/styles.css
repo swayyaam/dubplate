@@ -19,6 +19,10 @@
   --accent: #e8a33d;
   --accent-soft: rgba(232, 163, 61, 0.12);
   --danger: #e2685c;
+  /* Reserved for the signal path verdict and nothing else, which is why the
+     app's own accent is sampled from the artwork instead. */
+  --verdict-good: #5fbf7f;
+  --verdict-warn: #e0a33c;
 
   --row-height: 44px;
   --gutter: 24px;
@@ -410,24 +414,120 @@ button, input { font: inherit; color: inherit; }
   font-variant-numeric: tabular-nums;
 }
 
-/* A first sketch of the phase 5 signal path panel: source, output, and whether
-   anything went wrong on the way. */
-.signal {
+/* --- signal path ---------------------------------------------------------- */
+
+.path {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px var(--gutter) 34px;
   display: flex;
-  gap: 40px;
+  flex-direction: column;
+  gap: 22px;
+}
+.path > * { max-width: 720px; width: 100%; margin-inline: auto; }
+
+/* Green only when nothing altered the audio and the hardware really is at the
+   file's rate. Amber for anything else, including "the device would not say". */
+.verdict {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 9px;
+  text-align: left;
+}
+.verdict__badge {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.verdict__reason { font-size: 11.5px; color: var(--text-dim); }
+
+.verdict--perfect { background: rgba(95, 191, 127, 0.12); }
+.verdict--perfect .verdict__badge { color: var(--verdict-good); }
+.verdict--altered { background: rgba(224, 163, 60, 0.12); }
+.verdict--altered .verdict__badge { color: var(--verdict-warn); }
+
+.verdict--button {
+  border: none;
+  cursor: pointer;
+  width: min(560px, 100%);
+  transition: filter 120ms ease;
+}
+.verdict--button:hover { filter: brightness(1.25); }
+
+.block { display: flex; flex-direction: column; gap: 3px; }
+.block__title {
   margin: 0;
-  padding-top: 4px;
-  font-size: 11.5px;
-}
-.signal dt {
-  color: var(--text-faint);
-  font-size: 9.5px;
-  letter-spacing: 0.1em;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
   text-transform: uppercase;
-  margin-bottom: 4px;
+  color: var(--text-faint);
 }
-.signal dd { margin: 0; color: var(--text-dim); font-family: var(--mono); font-size: 11px; }
-.signal--warn { color: var(--danger); }
+.block__note { margin: 0 0 8px; font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
+.block__rows { margin: 0; display: flex; flex-direction: column; gap: 1px; }
+.block__row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  align-items: baseline;
+  gap: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.block__row:nth-child(odd) { background: rgba(255, 255, 255, 0.022); }
+.block__row dt { font-size: 12px; color: var(--text-dim); }
+.block__row dd { margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+/* Grey is the answer this panel wants to give most of the time. */
+.block__muted { color: var(--text-faint) !important; }
+.block__active { color: var(--verdict-warn) !important; }
+
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.toggle:hover { background: var(--hover); }
+.toggle input { margin-top: 1px; accent-color: var(--accent); }
+.toggle__warn { color: var(--verdict-warn); font-style: normal; }
+
+.modes { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.mode {
+  display: grid;
+  grid-template-columns: 18px auto;
+  grid-template-areas: "radio label" ". note";
+  gap: 2px 9px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.mode:hover { background: var(--hover); }
+.mode--on { background: var(--accent-soft); }
+.mode input { grid-area: radio; margin-top: 2px; accent-color: var(--accent); }
+.mode__label { grid-area: label; font-size: 12.5px; }
+.mode--on .mode__label { color: var(--accent); }
+.mode__note { grid-area: note; font-size: 11px; color: var(--text-faint); line-height: 1.45; }
+
+.rates { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px 28px; }
+.rate {
+  padding: 5px 11px;
+  border: none;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.rate:hover { color: var(--text); }
+.rate--on { background: var(--accent-soft); color: var(--accent); }
 
 /* --- queue ---------------------------------------------------------------- */
 
@@ -649,7 +749,11 @@ button, input { font: inherit; color: inherit; }
   cursor: help;
 }
 .chip__spec { color: var(--text-faint); font-weight: 500; font-variant-numeric: tabular-nums; }
-.chip--converted { background: var(--accent-soft); color: var(--accent); }
+.chip--button { border: none; cursor: pointer; font-family: var(--mono); }
+.chip--perfect { background: rgba(95, 191, 127, 0.14); color: var(--verdict-good); }
+.chip--perfect .chip__spec { color: var(--verdict-good); opacity: 0.7; }
+.chip--converted { background: rgba(224, 163, 60, 0.14); color: var(--verdict-warn); }
+.chip--converted .chip__spec { color: var(--verdict-warn); opacity: 0.7; }
 .chip--error {
   background: rgba(226, 104, 92, 0.14);
   color: var(--danger);
@@ -659,7 +763,6 @@ button, input { font: inherit; color: inherit; }
   white-space: nowrap;
 }
 .chip--warn { background: var(--accent-soft); color: var(--accent); }
-.chip--converted .chip__spec { color: var(--accent); opacity: 0.7; }
 
 .volume {
   width: 74px;

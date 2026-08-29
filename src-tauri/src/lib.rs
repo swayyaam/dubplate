@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use dubplate_audio::engine::{Command, Engine, PlayEvent, PlayerState, QueueItem, RepeatMode};
+use dubplate_audio::engine::{
+    Command, Engine, OutputSettings, PlayEvent, PlayerState, QueueItem, RepeatMode,
+};
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use dubplate_library::artwork::{self, ArtworkCache, ArtworkReport};
 use dubplate_library::{
@@ -18,6 +20,9 @@ const ROOT_KEY: &str = "library_root";
 const PLAYBACK_KEY: &str = "playback";
 /// The view the user was last on, so relaunching lands where they left off.
 const VIEW_KEY: &str = "last_view";
+/// Exclusive mode, rate handling and ReplayGain. Per-machine rather than
+/// per-library, but the index is where this app keeps its state.
+const OUTPUT_KEY: &str = "output_settings";
 /// Buckets in a waveform. Enough detail for a full-width seek bar, small enough
 /// to send over IPC without thinking about it.
 const WAVEFORM_BUCKETS: usize = 1000;
@@ -209,6 +214,32 @@ fn set_repeat(state: State<'_, Arc<AppState>>, mode: String) {
 #[tauri::command]
 fn set_shuffle(state: State<'_, Arc<AppState>>, shuffle: bool) {
     state.engine.send(Command::SetShuffle(shuffle));
+}
+
+/// Exclusive access, rate handling and ReplayGain.
+///
+/// Saved as well as applied: exclusive mode is a decision about a particular
+/// device, not something to re-make every launch.
+#[tauri::command]
+fn set_output_settings(
+    state: State<'_, Arc<AppState>>,
+    settings: OutputSettings,
+) -> Fallible<()> {
+    state
+        .engine
+        .send(Command::SetOutputSettings(settings.clone()));
+    if let (Ok(library), Ok(json)) = (state.library.lock(), serde_json::to_string(&settings)) {
+        let _ = library.set_state(OUTPUT_KEY, &json);
+    }
+    Ok(())
+}
+
+/// Rebuild the output stream against the current default device.
+///
+/// Also the honest answer to "audio has got stuck".
+#[tauri::command]
+fn reopen_output(state: State<'_, Arc<AppState>>) {
+    state.engine.send(Command::ReopenOutput);
 }
 
 #[tauri::command]
@@ -500,6 +531,21 @@ fn restore_playback(state: &Arc<AppState>) {
     state.engine.send(Command::Pause);
 }
 
+fn restore_output_settings(state: &Arc<AppState>) {
+    let json = {
+        let Ok(library) = state.library.lock() else {
+            return;
+        };
+        match library.get_state(OUTPUT_KEY) {
+            Ok(Some(json)) => json,
+            _ => return,
+        }
+    };
+    if let Ok(settings) = serde_json::from_str::<OutputSettings>(&json) {
+        state.engine.send(Command::SetOutputSettings(settings));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -539,6 +585,9 @@ pub fn run() {
                 }
             }
 
+            // Settings before the queue: exclusive access and the device rate
+            // are decided when a stream opens, so they have to be known first.
+            restore_output_settings(&state);
             restore_playback(&state);
 
             // Media keys and the macOS Now Playing panel. souvlaki dispatches to
@@ -651,7 +700,9 @@ pub fn run() {
             accent_color,
             waveform,
             get_ui_state,
-            set_ui_state
+            set_ui_state,
+            set_output_settings,
+            reopen_output
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

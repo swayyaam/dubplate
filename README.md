@@ -19,12 +19,10 @@ schema, audio engine, and the reasoning behind it.
 
 ## Status
 
-**Phase 4 — looks right.** The interface pass: album covers as the front door, a
-now-playing view built around the art, a waveform seek bar, and a command
-palette. The accent colour is sampled from whatever is playing, so the whole
-palette turns with the record.
+**Phase 5 — correctness.** Exclusive access, sample rate switching, ReplayGain
+applied, and a signal path panel wired to what the hardware actually reports.
 
-Measured on a real 1,358 track library (mixed FLAC/WAV/MP3/M4A, 384 covers):
+Measured on a real 1,358 track library and a real output device:
 
 | | |
 |---|---|
@@ -34,63 +32,64 @@ Measured on a real 1,358 track library (mixed FLAC/WAV/MP3/M4A, 384 covers):
 | Decode speed | 1500x – 10700x realtime |
 | Underruns across a gapless transition | +0 |
 | Underruns across an output device swap | +0 |
-| Index on disk | 896 KB |
+| Verdict, 44.1kHz FLAC played exclusively | bit-perfect |
+| Verdict, same file at 35% volume | altered, 1 stage |
 
 The audio callback is sacred: no allocation, no locks, no I/O. It drains the
 ring, applies a 10ms gain ramp, updates one atomic frame counter, and does
-nothing else. Position is read from that counter, never from the decoder, which
-runs ahead by whatever the ring holds.
+nothing else.
+
+The signal path panel is built on what CoreAudio says, not on what dubplate
+asked for. That distinction is the whole point of it, and it caught a real lie
+the first time it ran: the engine had been reporting its *requested* rate as the
+device rate, while the hardware sat at 44.1kHz claiming 48.
 
 Working today:
 
-- Parallel walk with `jwalk`, tags with `lofty`, both across all cores
-- Incremental sync: files whose `(mtime, size)` still match are never reopened
-- Move detection by content key, so a rename keeps play counts
-- FTS5 search with prefix matching and diacritic folding
-- Debounced filesystem watcher that re-indexes after a burst settles
+- Parallel walk, incremental sync, move detection, FTS5 search, filesystem watcher
 - Artwork cache: WebP at 64/300/1000px, keyed by image content
 - Symphonia decode of FLAC, WAV, AIFF, MP3, AAC, ALAC and Vorbis
-- Lock-free SPSC ring, CoreAudio output via `cpal`
-- Gapless: the next track is pre-rolled into the same ring, and "now playing"
-  flips when the listener reaches the join rather than when the decoder did
-- Device switching that keeps the open file and its position
-- Media keys and the macOS Now Playing panel via `souvlaki`
-- Play counts, skip counts and listening history
-- Album grid, album view, now playing, queue with drag to reorder
-- Waveform seek bar drawn from the track's own peaks
-- Command palette on `⌘K`: search every track, run every action
+- Lock-free SPSC ring, CoreAudio output, gapless, device switching, media keys
+- Exclusive (hog) mode, per device, released on pause, on exit, and by the
+  stream's own Drop
+- Three rate modes: follow file, follow album, and a fixed rate with a
+  high-quality FFT resampler
+- ReplayGain applied as volume times gain, held back by the stored peak so a
+  positive gain cannot clip
+- Signal path panel: source, decoder, processing, output, and a verdict
+- Album grid, album view, now playing, queue, waveform seek bar, command palette
 - One accent colour, sampled from the current cover
-- Virtualized everywhere: 10,000 rows and thousands of covers at 60fps
 
-Deliberately correct already, because they are easy to get wrong later:
+Deliberately correct already:
 
-- **Lossy codecs report no bit depth.** MP3, AAC and Vorbis store frequency
-  coefficients rather than samples. They decode straight to 32-bit float, so
-  bit depth stays null rather than showing a meaningless "16 bit".
-- **Format comes from the stream, never the tags.**
-- **MP4 lossiness is unknown, not guessed.** The container holds AAC or ALAC.
-- **An album badge appears only when every track agrees.** A mixed album gets
-  none, which beats picking whichever format sorted first.
+- **Lossy codecs report no bit depth.** They decode to 32-bit float and have
+  none to report; showing "16 bit" for an MP3 is meaningless.
+- **32-bit integer and 32-bit float are reported separately.** Both are common
+  and they are different things.
+- **The device format is read back, never echoed.** An unreadable format is
+  reported as unknown, not silently assumed to be what we asked for.
+- **Format comes from the stream, never the tags.** ReplayGain is the exception,
+  because it is metadata by definition.
+- **A positive ReplayGain cannot clip**, because the stored peak limits it.
+- **MP4 lossiness is unknown, not guessed.**
 - **macOS packages are not walked into.** DAW sample libraries are not tracks.
-- **A malformed tag never hides a valid file.**
 - **Gain is ramped, never stepped.**
 - **MP3 encoder delay and padding are trimmed**, so gapless is actually gapless.
-- **A greyscale sleeve yields no accent** rather than a muddy grey one.
-- **Nothing is ever written to your audio files.** Play counts live in the index.
+- **The device is put back as it was found** — rate restored, exclusive access
+  released — even if the app is quit mid-track.
+- **Nothing is ever written to your audio files.**
 
-Known gaps, deliberately left for later phases:
+Known gaps:
 
-- The output stream follows the file's sample rate. The fixed-rate and
-  follow-album modes, and the resampler they need, are phase 5. Gapless across a
-  rate change is therefore not possible, and the player falls back to an
-  ordinary gapped change.
-- The stream reports the configuration cpal negotiated, not what the hardware is
-  running. A real bit-perfect verdict needs the device format read back, which
-  is phase 5. The now-playing readout is a sketch of that panel, not the verdict.
+- ReplayGain has nothing to apply yet on a library whose files carry no tags:
+  none of the 1,358 tracks in the test library have any. Phase 5 owns applying
+  it; phase 6 computes the values.
+- Crossfade is listed in the processing block and always reads "none". It shares
+  most of gapless's machinery and lands after it.
 - Waveform peaks are computed on demand for whatever is playing. Phase 6 folds
-  them into the analysis pass, where one decode also feeds loudness, BPM, key
-  and spectral analysis.
-- Default-device *moves* are polled twice a second; a device *disappearing* is
+  them into the analysis pass.
+- Default-device *moves* are polled twice a second, using
+  `kAudioHardwarePropertyDefaultOutputDevice`; a device *disappearing* is
   reported immediately through cpal's stream error callback.
 
 ## Roadmap
@@ -102,8 +101,8 @@ Known gaps, deliberately left for later phases:
 | 2 | Symphonia decode, ring buffer, CoreAudio output, queue | done |
 | 3 | Gapless, device switching, media keys, resume, play counts | done |
 | 4 | The UI pass — art grid, now playing, command palette, waveform seek | done |
-| 5 | Exclusive mode, sample rate switching, ReplayGain, signal path panel | next |
-| 6 | Analysis pipeline, transcode detection, collection health, smart playlists | |
+| 5 | Exclusive mode, sample rate switching, ReplayGain, signal path panel | done |
+| 6 | Analysis pipeline, transcode detection, collection health, smart playlists | next |
 
 Phases 0 to 3 are a usable player, and they are done. Everything after is the
 reason to keep going.
@@ -154,6 +153,19 @@ Watch a gapless join between two tracks at the same sample rate:
 
 ```bash
 cargo run --release -p dubplate-audio --example play -- first.flac second.flac --gapless
+```
+
+Ask the hardware what it is actually doing, and test exclusive access:
+
+```bash
+cargo run --release -p dubplate-audio --example device
+cargo run --release -p dubplate-audio --example device -- --hog
+```
+
+Play a track exclusively, at the file's own rate, and print the signal path:
+
+```bash
+cargo run --release -p dubplate-audio --example play -- track.flac --exclusive
 ```
 
 See the accent colour each cached cover produces:

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::CpalBackend;
 use crate::decode::TrackDecoder;
 use crate::device::{AudioBackend, AudioError, DeviceFormat, DeviceInfo, OutputStream, StreamRequest};
+use crate::resample::Resampler;
 use crate::ring::{self, Boundary, PlaybackShared};
 
 /// How long the decode thread will wait for the callback to acknowledge a seek
@@ -352,6 +353,9 @@ enum DecodeCommand {
         decoder: Box<TrackDecoder>,
         sinks: Option<(Producer<f32>, Producer<Boundary>)>,
         generation: u64,
+        /// The rate the ring runs at. Differs from the file's rate only in
+        /// fixed-rate mode, and then the decoder resamples to meet it.
+        output_rate: u32,
     },
     /// The next track, decoded into the same ring behind the current one so
     /// there is no gap when the current one ends.
@@ -367,6 +371,7 @@ enum DecodeCommand {
         sinks: (Producer<f32>, Producer<Boundary>),
         frames: u64,
         generation: u64,
+        output_rate: u32,
     },
     Stop,
     Shutdown,
@@ -397,6 +402,36 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
     let mut frames_written = 0u64;
     let mut generation = 0u64;
     let mut asked_for_next = false;
+    let mut output_rate = 0u32;
+    let mut resampler: Option<Resampler> = None;
+
+    // Match the resampler to whatever is playing: none when the file already
+    // runs at the ring's rate, which is the common case and the only one that
+    // can be bit-perfect.
+    fn retune(
+        resampler: &mut Option<Resampler>,
+        file_rate: u32,
+        output_rate: u32,
+        channels: u16,
+    ) {
+        if output_rate == 0 || file_rate == output_rate {
+            *resampler = None;
+            return;
+        }
+        let matches = resampler
+            .as_ref()
+            .map(|r| r.from_rate() == file_rate && r.to_rate() == output_rate)
+            .unwrap_or(false);
+        if !matches {
+            match Resampler::new(file_rate, output_rate, channels) {
+                Ok(new) => *resampler = Some(new),
+                Err(err) => {
+                    tracing::error!(%err, "cannot resample; playing at the file's rate");
+                    *resampler = None;
+                }
+            }
+        }
+    }
 
     loop {
         match rx.try_recv() {
@@ -404,7 +439,15 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
                 decoder,
                 sinks,
                 generation: new_generation,
+                output_rate: rate,
             }) => {
+                output_rate = rate;
+                retune(
+                    &mut resampler,
+                    decoder.format().sample_rate,
+                    rate,
+                    decoder.format().channels,
+                );
                 current = Some(decoder);
                 queued = None;
                 asked_for_next = false;
@@ -442,6 +485,10 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
                 pending_at = 0;
                 frames_written = 0;
                 generation = new_generation;
+                if let Some(resampler) = resampler.as_mut() {
+                    // What it has buffered belongs to where we were.
+                    resampler.reset();
+                }
                 // Do not write until the callback has thrown away the audio
                 // belonging to where we were, or it will discard this too.
                 await_drain(&shared, new_generation);
@@ -450,7 +497,17 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
                 sinks,
                 frames,
                 generation: new_generation,
+                output_rate: rate,
             }) => {
+                output_rate = rate;
+                if let Some(decoder) = current.as_ref() {
+                    retune(
+                        &mut resampler,
+                        decoder.format().sample_rate,
+                        rate,
+                        decoder.format().channels,
+                    );
+                }
                 // The device changed underneath us. The file stays open and
                 // keeps its position; only the ring and the stream are new.
                 if let Some(decoder) = current.as_mut() {
@@ -518,13 +575,24 @@ fn decode_thread(rx: Receiver<DecodeCommand>, tx: Sender<DecodeEvent>, shared: A
         match active.next_block() {
             Ok(Some(block)) => {
                 pending.clear();
-                pending.extend_from_slice(block);
                 pending_at = 0;
+                match resampler.as_mut() {
+                    // Fixed-rate mode: the file is converted here, on the decode
+                    // thread, never on the audio thread.
+                    Some(resampler) => resampler.process(block, &mut pending),
+                    None => pending.extend_from_slice(block),
+                }
             }
             Ok(None) => match queued.take() {
                 // Gapless: the next track's audio goes straight into the ring
                 // behind this one, with a marker where the listener crosses over.
                 Some((next, seq)) => {
+                    retune(
+                        &mut resampler,
+                        next.format().sample_rate,
+                        output_rate,
+                        next.format().channels,
+                    );
                     if let Some(marks) = boundaries.as_mut() {
                         let _ = marks.push(Boundary {
                             generation,
@@ -602,6 +670,9 @@ struct Control {
     settings: OutputSettings,
     /// The album the open stream's rate was chosen for, for "follow album".
     stream_album: Option<i64>,
+    /// The rate of the file playing. Differs from the ring's rate in fixed-rate
+    /// mode, and seeks are in file frames while positions are in ring frames.
+    file_rate: u32,
     /// The device's rate before we ever opened a stream on it.
     ///
     /// Captured before, not during: opening a stream can move the nominal rate
@@ -661,6 +732,7 @@ impl Control {
             volume: 1.0,
             settings: OutputSettings::default(),
             stream_album: None,
+            file_rate: 44_100,
             original_rate: None,
             current_gain_db: None,
             current_peak: None,
@@ -914,6 +986,7 @@ impl Control {
                 self.current_gain_db = item.replay_gain_db;
                 self.current_peak = item.replay_gain_peak;
             }
+            self.file_rate = track.source.sample_rate;
             self.current_source = Some(track.source.clone());
             self.apply_gain();
             self.progress = Some(PlayProgress {
@@ -1006,12 +1079,15 @@ impl Control {
         };
         let format = decoder.format().clone();
 
-        // The stream follows the file's rate. Phase 5 adds the fixed-rate and
-        // follow-album modes, with a resampler; until then CoreAudio converts in
-        // shared mode, which the signal path panel will have to report honestly.
+        // Fixed-rate mode pins the ring to one rate and resamples into it;
+        // the other two modes let the ring follow the file.
+        let output_rate = match self.settings.rate_mode {
+            RateMode::Fixed(rate) => rate,
+            _ => format.sample_rate,
+        };
         let needs_stream = match self.stream.as_ref() {
             Some(stream) => {
-                stream.info().sample_rate != format.sample_rate
+                stream.info().sample_rate != output_rate
                     || stream.info().channels != format.channels
             }
             None => true,
@@ -1023,7 +1099,7 @@ impl Control {
 
         let generation = self.shared.begin_seek(start_frames);
         let sinks = if needs_stream {
-            match self.open_stream(format.sample_rate, format.channels) {
+            match self.open_stream(output_rate, format.channels) {
                 Ok(sinks) => Some(sinks),
                 Err(err) => {
                     self.set_error(Some(err));
@@ -1034,12 +1110,13 @@ impl Control {
             None
         };
 
-        self.sample_rate
-            .store(format.sample_rate, Ordering::Relaxed);
+        // Position is measured in ring frames, so this is the output rate.
+        self.sample_rate.store(output_rate, Ordering::Relaxed);
+        self.file_rate = format.sample_rate;
         self.current_gain_db = item.replay_gain_db;
         self.current_peak = item.replay_gain_peak;
         self.apply_gain();
-        self.engage_output(format.sample_rate, item.album_id);
+        self.engage_output(output_rate, item.album_id);
 
         let duration_ms = format
             .duration()
@@ -1057,12 +1134,13 @@ impl Control {
             decoder: Box::new(decoder),
             sinks,
             generation,
+            output_rate,
         });
 
         // Start the device only once there is audio to give it. Starting into
         // an empty ring is an underrun by construction, and it is audible as a
         // click at the beginning of every track.
-        self.await_prime(format.sample_rate, format.channels);
+        self.await_prime(output_rate, format.channels);
 
         if let Some(stream) = self.stream.as_mut() {
             let _ = stream.play();
@@ -1213,14 +1291,22 @@ impl Control {
             self.awaiting_device = false;
             return;
         };
-        let rate = stream.info().sample_rate;
         let channels = stream.info().channels;
-        let frames = self.shared.frames_played();
+        // Recompute rather than reuse: the reason we are rebuilding is often
+        // that the rate mode changed, and carrying the old stream's rate over
+        // would quietly ignore it.
+        let rate = match self.settings.rate_mode {
+            RateMode::Fixed(fixed) => fixed,
+            _ => self.file_rate,
+        };
+        let ring_frames = self.shared.frames_played();
+        let position_ms = ring_frames * 1000 / self.sample_rate.load(Ordering::Relaxed).max(1) as u64;
+        let frames = position_ms * self.file_rate.max(1) as u64 / 1000;
         let was_playing = self.shared.is_playing() || self.awaiting_device;
 
         // Anything pre-rolled belongs to the ring that is about to be replaced.
         self.pending.clear();
-        let generation = self.shared.begin_seek(frames);
+        let generation = self.shared.begin_seek(ring_frames);
 
         match self.open_stream(rate, channels) {
             Ok(sinks) => {
@@ -1233,6 +1319,7 @@ impl Control {
                     sinks,
                     frames,
                     generation,
+                    output_rate: rate,
                 });
                 self.await_prime(rate, channels);
                 if let Some(stream) = self.stream.as_mut() {
@@ -1367,10 +1454,16 @@ impl Control {
     }
 
     fn seek_ms(&mut self, ms: u64) {
-        let rate = self.sample_rate.load(Ordering::Relaxed).max(1) as u64;
-        let frames = ms * rate / 1000;
-        let generation = self.shared.begin_seek(frames);
-        let _ = self.decode_tx.send(DecodeCommand::Seek { frames, generation });
+        // Two timebases: the callback counts frames at the ring's rate, and the
+        // decoder seeks in the file's own frames. They are the same number only
+        // when nothing is being resampled.
+        let ring_rate = self.sample_rate.load(Ordering::Relaxed).max(1) as u64;
+        let generation = self.shared.begin_seek(ms * ring_rate / 1000);
+        let file_frames = ms * self.file_rate.max(1) as u64 / 1000;
+        let _ = self.decode_tx.send(DecodeCommand::Seek {
+            frames: file_frames,
+            generation,
+        });
     }
 
     fn position_ms(&self) -> u64 {
@@ -1401,10 +1494,13 @@ impl Control {
         let stream = self.stream.as_ref();
         let physical = stream.and_then(|s| s.info().physical.as_ref());
 
-        // Something resampled if the hardware is not running at the file's rate.
-        // Whether it was us or CoreAudio, the audio was altered.
+        // Something resampled if the hardware is not running at the file's
+        // rate. Whether it was us or CoreAudio, the audio was altered.
         let device_rate = physical.map(|format| format.sample_rate);
-        let resampled = device_rate.map(|rate| rate != source.sample_rate).unwrap_or(false);
+        let ring_rate = self.sample_rate.load(Ordering::Relaxed);
+        let we_resampled = ring_rate != source.sample_rate;
+        let resampled = we_resampled
+            || device_rate.map(|rate| rate != source.sample_rate).unwrap_or(false);
 
         let volume_active = (self.volume - 1.0).abs() > 0.001;
         let replay_gain = self.replay_gain_active();
@@ -1414,11 +1510,15 @@ impl Control {
                 name: "Resampling".into(),
                 active: resampled,
                 detail: resampled.then(|| {
-                    format!(
-                        "{} Hz to {} Hz",
-                        source.sample_rate,
-                        device_rate.unwrap_or(0)
-                    )
+                    if we_resampled {
+                        format!("{} Hz to {ring_rate} Hz, in dubplate", source.sample_rate)
+                    } else {
+                        format!(
+                            "{} Hz to {} Hz, by the system",
+                            source.sample_rate,
+                            device_rate.unwrap_or(0)
+                        )
+                    }
                 }),
             },
             Stage {
@@ -1462,8 +1562,9 @@ impl Control {
 
         Some(SignalPath {
             source,
-            // Decoders emit 32-bit float. That is not a choice we make.
-            decoder_sample_rate: self.sample_rate.load(Ordering::Relaxed),
+            // What came out of Symphonia, which is the file's own rate. Any
+            // conversion after it belongs in the processing block, not here.
+            decoder_sample_rate: self.file_rate,
             decoder_format: "f32".into(),
             processing,
             device_name: stream.map(|s| s.info().device.name.clone()),

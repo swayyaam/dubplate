@@ -19,6 +19,15 @@ fn main() -> anyhow::Result<()> {
 
     let gapless = paths.iter().any(|p| p == "--gapless");
     let exclusive = paths.iter().any(|p| p == "--exclusive");
+    let fixed: Option<u32> = paths
+        .iter()
+        .position(|p| p == "--fixed")
+        .and_then(|at| paths.get(at + 1))
+        .and_then(|r| r.parse().ok());
+    let mut paths: Vec<String> = paths;
+    if let Some(at) = paths.iter().position(|p| p == "--fixed") {
+        paths.drain(at..=(at + 1).min(paths.len() - 1));
+    }
     let paths: Vec<String> = paths
         .into_iter()
         .filter(|p| p != "--gapless" && p != "--exclusive")
@@ -31,18 +40,22 @@ fn main() -> anyhow::Result<()> {
         .map(|(index, path)| queue_item(index as i64, path))
         .collect();
 
-    engine.send(Command::SetQueue { items, start: 0 });
-    engine.send(Command::SetVolume(if exclusive { 1.0 } else { 0.35 }));
-    if exclusive {
+    if exclusive || fixed.is_some() {
         // Exclusive plus follow-file is the combination the design document
         // calls the best-fidelity path: the device runs at the file's rate and
-        // nothing else on the machine can move it.
+        // nothing else on the machine can move it. Fixed rate is the opposite
+        // trade -- everything resampled, gapless never broken.
         engine.send(Command::SetOutputSettings(OutputSettings {
-            exclusive: true,
-            rate_mode: RateMode::FollowFile,
+            exclusive,
+            rate_mode: match fixed {
+                Some(rate) => RateMode::Fixed(rate),
+                None => RateMode::FollowFile,
+            },
             replay_gain: true,
         }));
     }
+    engine.send(Command::SetQueue { items, start: 0 });
+    engine.send(Command::SetVolume(if exclusive || fixed.is_some() { 1.0 } else { 0.35 }));
 
     settle(&engine);
     let state = engine.snapshot();

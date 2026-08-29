@@ -18,6 +18,7 @@ pub mod device;
 pub mod engine;
 pub mod gain;
 pub mod peaks;
+pub mod resample;
 pub mod ring;
 pub mod sine;
 

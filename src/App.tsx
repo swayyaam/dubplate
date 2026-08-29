@@ -10,6 +10,7 @@ import { AlbumsView } from "./views/AlbumsView";
 import { AlbumView } from "./views/AlbumView";
 import { NowPlayingView } from "./views/NowPlayingView";
 import { QueueView } from "./views/QueueView";
+import { SignalPathView } from "./views/SignalPathView";
 import { formatBytes, formatTotalTime } from "./lib/format";
 import { usePlayerValue } from "./lib/playerStore";
 
@@ -176,6 +177,7 @@ export default function App() {
         label: `Go to ${tab.label}`,
         run: () => goTo(tab.view),
       })),
+      { id: "signal", label: "Show signal path", run: () => goTo("signal") },
       { id: "rescan", label: "Rescan library", run: () => void rescan() },
       { id: "folder", label: "Change music folder", run: () => void chooseFolder() },
     ],
@@ -229,7 +231,13 @@ export default function App() {
             {TABS.map((tab) => (
               <button
                 key={tab.view}
-                className={`tab${view === tab.view || (view === "album" && tab.view === "albums") ? " tab--on" : ""}`}
+                className={`tab${
+                  view === tab.view ||
+                  (view === "album" && tab.view === "albums") ||
+                  (view === "signal" && tab.view === "playing")
+                    ? " tab--on"
+                    : ""
+                }`}
                 onClick={() => goTo(tab.view)}
               >
                 {tab.label}
@@ -328,11 +336,20 @@ export default function App() {
           </div>
         )}
 
-        {hasLibrary && view === "playing" && <NowPlayingView trackById={trackById} />}
+        {hasLibrary && view === "playing" && (
+          <NowPlayingView trackById={trackById} onOpenSignal={() => goTo("signal")} />
+        )}
+        {hasLibrary && view === "signal" && <SignalPathView onBack={() => goTo("playing")} />}
         {hasLibrary && view === "queue" && <QueueView trackById={trackById} />}
       </main>
 
-      {hasLibrary && <Transport trackById={trackById} onOpenNowPlaying={() => goTo("playing")} />}
+      {hasLibrary && (
+        <Transport
+          trackById={trackById}
+          onOpenNowPlaying={() => goTo("playing")}
+          onOpenSignal={() => goTo("signal")}
+        />
+      )}
 
       {hasLibrary && view === "tracks" && (
         <footer className="statusbar">
