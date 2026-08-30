@@ -19,7 +19,9 @@ import { formatBytes, formatTotalTime } from "./lib/format";
 import { usePlayerValue } from "./lib/playerStore";
 
 const SEARCH_LIMIT = 2000;
-const DEFAULT_ACCENT = "#e8a33d";
+/** Spotify green, per DESIGN.md. The waveform falls back to it when a track
+ *  has no artwork to sample. */
+const DEFAULT_ART = "#1ed760";
 
 const TABS: { view: View; label: string }[] = [
   { view: "albums", label: "Albums" },
@@ -127,19 +129,23 @@ export default function App() {
     };
   }, [loadTracks, loadAlbums]);
 
-  // One accent colour, taken from whatever is playing. The whole palette turns
-  // with the record rather than staying a fixed brand colour.
+  // A colour sampled from whatever is playing, used by the waveform alone.
+  //
+  // Not the interface accent: DESIGN.md makes the accent functional and the
+  // rest of the interface achromatic, and also asks for album art to be the
+  // source of colour. Both hold if the chrome stays green and the artwork
+  // colours the one element that is actually the content.
   useEffect(() => {
     const hash = playingId !== null ? trackById.get(playingId)?.artHash : null;
     if (!hash) {
-      document.documentElement.style.setProperty("--accent", DEFAULT_ACCENT);
+      document.documentElement.style.setProperty("--art", DEFAULT_ART);
       return;
     }
     let live = true;
     void invoke<string | null>("accent_color", { hash })
       .then((colour) => {
         if (live) {
-          document.documentElement.style.setProperty("--accent", colour ?? DEFAULT_ACCENT);
+          document.documentElement.style.setProperty("--art", colour ?? DEFAULT_ART);
         }
       })
       .catch(() => {});

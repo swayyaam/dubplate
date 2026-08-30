@@ -60,7 +60,9 @@ Working today:
 - Album grid, album view, now playing, queue, command palette
 - Waveform seek bar: one continuous shape, RMS filled with peak as an aura,
   coloured by the low/mid/high mix
-- One accent colour, sampled from the current cover
+- Spotify-derived visual system (see [DESIGN.md](DESIGN.md)): near-black
+  surfaces, one functional green accent, pill and circle geometry
+- The waveform is coloured from the current cover; the interface stays achromatic
 
 Deliberately correct, because each is easy to get wrong:
 

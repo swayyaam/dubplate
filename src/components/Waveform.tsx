@@ -84,18 +84,25 @@ export const Waveform = memo(function Waveform({
     context.clearRect(0, 0, width, height);
 
     const styles = getComputedStyle(document.documentElement);
-    const accent = styles.getPropertyValue("--accent").trim() || "#e8a33d";
+    // The artwork colour, not the interface accent. See DESIGN.md.
+    const accent = styles.getPropertyValue("--art").trim() || "#1ed760";
     const middle = height / 2;
     const boundary = width * Math.min(1, Math.max(0, progress));
 
     if (!data || data.buckets === 0) {
-      // No analysis yet: a plain bar, so the control is usable immediately
-      // rather than absent until a decode finishes.
-      const track = Math.max(2, Math.round(height * 0.12));
-      context.fillStyle = "rgba(255,255,255,0.16)";
-      context.fillRect(0, middle - track / 2, width, track);
-      context.fillStyle = accent;
-      context.fillRect(0, middle - track / 2, boundary, track);
+      // No analysis yet: a plain progress bar, so the control is usable
+      // immediately rather than absent until a decode finishes. Rounded and
+      // the same weight as the one in the transport, so its arrival as a
+      // waveform is the only thing that changes.
+      const track = Math.max(4, Math.round(height * 0.1));
+      const bar = (to: number, colour: string) => {
+        context.fillStyle = colour;
+        context.beginPath();
+        context.roundRect(0, middle - track / 2, Math.max(track, to), track, track / 2);
+        context.fill();
+      };
+      bar(width, styles.getPropertyValue("--border").trim() || "#4d4d4d");
+      if (boundary > 0) bar(boundary, styles.getPropertyValue("--text").trim() || "#ffffff");
       return;
     }
 
@@ -368,7 +375,7 @@ function gradient(
  * accent itself, so the colour says something before you have read anything.
  */
 function bandPalette(accent: string): [Rgb, Rgb, Rgb] {
-  const [h, s, l] = toHsl(parseHex(accent) ?? [232, 163, 61]);
+  const [h, s, l] = toHsl(parseHex(accent) ?? [30, 215, 96]);
   const saturated = Math.max(0.62, Math.min(1, s * 1.35));
   return [
     // Deep and hot.
