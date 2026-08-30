@@ -1165,12 +1165,13 @@ button, input { font: inherit; color: inherit; }
  *
  * DESIGN.md keeps the interface achromatic and the accent functional, and also
  * asks for album art to be the primary source of colour. Now playing is where
- * the second rule wins: the controls stay green, and everything behind them is
+ * the second rule wins: the controls stay green, and the space behind them is
  * the sleeve.
  *
- * Three washes drift at different speeds and in different directions. The
- * periods are deliberately not multiples of each other, so the pattern does
- * not visibly loop.
+ * One colour fills it and everything else only modulates. What a record looks
+ * like from across the room is a single colour moving a little, not three hues
+ * chasing each other -- washes of equal weight read as a lava lamp, which is
+ * an effect rather than an atmosphere.
  */
 .playing { isolation: isolate; }
 
@@ -1179,57 +1180,64 @@ button, input { font: inherit; color: inherit; }
   inset: 0;
   z-index: 0;
   overflow: hidden;
+  background: var(--aura-base, transparent);
   /* Fades out before the transport, so the bar below stays near-black and the
-     wash reads as depth behind the record rather than as a coloured panel. */
-  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+     colour reads as depth behind the record rather than as a coloured panel. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 62%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 62%, transparent 100%);
   pointer-events: none;
 }
 
 /*
  * Radial gradients rather than blurred shapes. A `filter: blur()` on a moving
- * element is re-computed every frame; a soft-edged gradient moved by transform
- * is composited and costs nothing.
+ * element is recomputed every frame; a soft-edged gradient translated by the
+ * compositor costs nothing.
+ *
+ * Faint on purpose. These sit a little above the base in lightness and share
+ * its hue family, so what you see is the field breathing rather than shapes
+ * crossing it.
  */
 .aura__blob {
   position: absolute;
-  width: 115%;
-  height: 115%;
+  width: 130%;
+  height: 130%;
   border-radius: 50%;
-  opacity: 0.62;
+  opacity: 0.42;
   will-change: transform;
 }
 
 .aura__blob--1 {
-  top: -25%;
-  left: -15%;
-  background: radial-gradient(circle at 50% 50%, var(--aura-1, transparent) 0%, transparent 68%);
-  animation: aura-drift-1 34s ease-in-out infinite alternate;
+  top: -35%;
+  left: -25%;
+  background: radial-gradient(circle at 50% 50%, var(--aura-1, transparent) 0%, transparent 62%);
+  animation: aura-drift-1 52s ease-in-out infinite alternate;
 }
 .aura__blob--2 {
-  top: -10%;
-  right: -20%;
-  background: radial-gradient(circle at 50% 50%, var(--aura-2, transparent) 0%, transparent 66%);
-  animation: aura-drift-2 47s ease-in-out infinite alternate;
+  top: -20%;
+  right: -30%;
+  background: radial-gradient(circle at 50% 50%, var(--aura-2, transparent) 0%, transparent 60%);
+  animation: aura-drift-2 71s ease-in-out infinite alternate;
 }
 .aura__blob--3 {
-  bottom: -30%;
-  left: 20%;
-  background: radial-gradient(circle at 50% 50%, var(--aura-3, transparent) 0%, transparent 70%);
-  animation: aura-drift-3 41s ease-in-out infinite alternate;
+  bottom: -40%;
+  left: 10%;
+  background: radial-gradient(circle at 50% 50%, var(--aura-3, transparent) 0%, transparent 64%);
+  animation: aura-drift-3 63s ease-in-out infinite alternate;
 }
 
+/* Small movements. The point is that you cannot catch it moving, only notice
+   that it has. */
 @keyframes aura-drift-1 {
   from { transform: translate3d(0, 0, 0) scale(1); }
-  to   { transform: translate3d(18%, 12%, 0) scale(1.25); }
+  to   { transform: translate3d(7%, 5%, 0) scale(1.1); }
 }
 @keyframes aura-drift-2 {
-  from { transform: translate3d(0, 0, 0) scale(1.15); }
-  to   { transform: translate3d(-22%, 18%, 0) scale(0.9); }
+  from { transform: translate3d(0, 0, 0) scale(1.08); }
+  to   { transform: translate3d(-8%, 7%, 0) scale(0.96); }
 }
 @keyframes aura-drift-3 {
-  from { transform: translate3d(0, 0, 0) scale(0.95); }
-  to   { transform: translate3d(14%, -20%, 0) scale(1.3); }
+  from { transform: translate3d(0, 0, 0) scale(0.98); }
+  to   { transform: translate3d(6%, -7%, 0) scale(1.12); }
 }
 
 /* Someone who has asked the system not to animate things means it. */
@@ -1238,19 +1246,19 @@ button, input { font: inherit; color: inherit; }
 }
 
 /*
- * Glass: a translucent pane that samples the wash behind it.
+ * Glass: a translucent pane over the colour.
  *
- * Only on the panels that actually sit over the colour. Backdrop blur is
- * expensive over large areas, so the aura is masked away before the transport
- * and nothing full-width uses this.
+ * Only on the panels that actually sit on it. Backdrop blur is expensive over
+ * large areas, so the wash is masked away before the transport and nothing
+ * full-width uses this.
  */
 .glass {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  background: rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(30px) saturate(1.2);
+  -webkit-backdrop-filter: blur(30px) saturate(1.2);
   /* A hairline of light along the top edge, which is what makes a pane read as
-     glass rather than as a grey box. */
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), var(--shadow-card);
+     glass rather than as a darker box. */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .playing__text.glass {
@@ -1261,16 +1269,17 @@ button, input { font: inherit; color: inherit; }
   padding: 18px 20px 12px;
   border-radius: var(--r-panel);
 }
-.button.glass:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+.button.glass { background: rgba(0, 0, 0, 0.22); }
+.button.glass:hover:not(:disabled) { background: rgba(0, 0, 0, 0.34); }
 
 /* The verdict already has a surface; over the wash it becomes glass too. */
 .playing .verdict {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-backdrop-filter: blur(24px) saturate(1.4);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(30px) saturate(1.2);
+  -webkit-backdrop-filter: blur(30px) saturate(1.2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
-.playing .verdict--button:hover { background: rgba(255, 255, 255, 0.1); }
+.playing .verdict--button:hover { background: rgba(0, 0, 0, 0.3); }
 
-/* The sleeve sits above the wash it produced. */
-.playing .cover--hero { box-shadow: 0 32px 80px rgba(0, 0, 0, 0.65); }
+/* The sleeve sits above the colour it produced. */
+.playing .cover--hero { box-shadow: 0 32px 80px rgba(0, 0, 0, 0.55); }

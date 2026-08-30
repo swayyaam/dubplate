@@ -339,21 +339,34 @@ pub fn accent(cache: &ArtworkCache, hash: &str) -> Option<String> {
     Some(format!("#{:02x}{:02x}{:02x}", r, g, b))
 }
 
-/// Up to three colours from a sleeve, for the now playing backdrop.
+/// The now playing backdrop: one colour that fills the screen, and a few
+/// faint washes that move across it.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Backdrop {
+    /// The sleeve's dominant colour, deep enough that pale grey text still
+    /// reads against it. Empty when the sleeve has no colour to offer.
+    pub base: String,
+    /// Slow-moving modulation, drawn faintly over the base.
+    pub washes: Vec<String>,
+}
+
+/// Colours from a sleeve for the now playing backdrop.
 ///
-/// Separated in hue rather than simply the three heaviest buckets: adjacent
-/// buckets on a photograph are usually the same colour split in two, and three
-/// shades of the same orange make a backdrop that may as well be one colour.
+/// One dominant colour carries the screen and the rest only modulate it. Three
+/// equally weighted hues sweeping around read as a lava lamp: what a record
+/// actually looks like from across the room is one colour, moving a little.
 ///
-/// Re-lit darker and more saturated than `accent`, because these are washes
-/// behind a near-black screen rather than text that has to stay legible.
-pub fn palette(cache: &ArtworkCache, hash: &str) -> Vec<String> {
-    const WANT: usize = 3;
+/// The washes are picked from buckets separated on the hue wheel, because
+/// adjacent buckets on a photograph are usually the same colour split in two
+/// and three shades of one orange modulate nothing.
+pub fn backdrop(cache: &ArtworkCache, hash: &str) -> Backdrop {
+    const WASHES: usize = 3;
     /// Minimum separation between chosen buckets, in buckets.
     const APART: usize = 3;
 
     let Some((weights, sums)) = hue_buckets(cache, hash) else {
-        return Vec::new();
+        return Backdrop::default();
     };
 
     let mut order: Vec<usize> = (0..HUE_BUCKETS).filter(|b| weights[*b] > f64::EPSILON).collect();
@@ -368,30 +381,45 @@ pub fn palette(cache: &ArtworkCache, hash: &str) -> Vec<String> {
         if !clash {
             chosen.push(bucket);
         }
-        if chosen.len() == WANT {
+        if chosen.len() == WASHES {
             break;
         }
     }
-    if chosen.is_empty() {
-        return Vec::new();
-    }
+    let Some(&dominant) = chosen.first() else {
+        return Backdrop::default();
+    };
 
-    // A sleeve with only one or two real colours gets the ones it has, shifted
-    // around the wheel, rather than a backdrop that is flat on one side.
-    let mut out = Vec::with_capacity(WANT);
-    for index in 0..WANT {
-        let bucket = chosen[index % chosen.len()];
-        let (hue, saturation, _) = bucket_hsl(&sums, &weights, bucket);
-        let spun = hue + if index < chosen.len() { 0.0 } else { 28.0 * index as f64 };
-        let (r, g, b) = from_hsl(
-            spun.rem_euclid(360.0),
-            saturation.clamp(0.5, 0.9),
-            // Descending, so the layers read as depth rather than as a flat wash.
-            0.46 - 0.07 * index as f64,
-        );
-        out.push(format!("#{:02x}{:02x}{:02x}", r, g, b));
-    }
-    out
+    // Deep, not bright. This fills most of a screen that also carries small
+    // grey text, and a vivid field behind 12px type is unreadable.
+    let (dominant_hue, saturation, _) = bucket_hsl(&sums, &weights, dominant);
+    let (r, g, b) = from_hsl(dominant_hue, saturation.clamp(0.45, 0.8), 0.19);
+    let base = format!("#{:02x}{:02x}{:02x}", r, g, b);
+
+    // Each wash is pulled most of the way back to the dominant hue. Left where
+    // the sleeve put them, a secondary colour parks a patch of a different hue
+    // on one side of the screen and the field stops reading as one colour --
+    // which is the whole idea. A third of the way out is enough to keep the
+    // sleeve's character without breaking it into panels.
+    const PULL: f64 = 0.34;
+    let washes = (0..WASHES)
+        .map(|index| {
+            let bucket = chosen[index % chosen.len()];
+            let (hue, saturation, _) = bucket_hsl(&sums, &weights, bucket);
+            // Shortest way round the wheel, so a hue at 350 and one at 10 are
+            // twenty degrees apart rather than three hundred and forty.
+            let delta = (hue - dominant_hue + 540.0).rem_euclid(360.0) - 180.0;
+            // A sleeve with only one real colour modulates with itself.
+            let spread = if index < chosen.len() { 0.0 } else { 14.0 * index as f64 };
+            let (r, g, b) = from_hsl(
+                (dominant_hue + delta * PULL + spread).rem_euclid(360.0),
+                saturation.clamp(0.4, 0.75),
+                0.30 - 0.03 * index as f64,
+            );
+            format!("#{:02x}{:02x}{:02x}", r, g, b)
+        })
+        .collect();
+
+    Backdrop { base, washes }
 }
 
 fn to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {

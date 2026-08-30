@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { FlowStep, TrackRow } from "../types";
+import type { Backdrop, FlowStep, TrackRow } from "../types";
 import { Cover } from "../components/Cover";
 import { Waveform } from "../components/Waveform";
 import { formatDuration, formatKhz, trackArtist, trackTitle } from "../lib/format";
@@ -25,20 +25,20 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
   const [peaks, setPeaks] = useState<WaveformData | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
   const [building, setBuilding] = useState(false);
-  const [palette, setPalette] = useState<string[]>([]);
+  const [backdrop, setBackdrop] = useState<Backdrop | null>(null);
 
   // Colours from the sleeve, for the backdrop. Separate from the single accent
   // the waveform uses: a wash needs more than one colour or it has no depth.
   const artHash = trackId !== null ? (trackById.get(trackId)?.artHash ?? null) : null;
   useEffect(() => {
     if (!artHash) {
-      setPalette([]);
+      setBackdrop(null);
       return;
     }
     let live = true;
-    void invoke<string[]>("accent_palette", { hash: artHash })
-      .then((colours) => live && setPalette(colours))
-      .catch(() => live && setPalette([]));
+    void invoke<Backdrop>("accent_palette", { hash: artHash })
+      .then((result) => live && setBackdrop(result.base ? result : null))
+      .catch(() => live && setBackdrop(null));
     return () => {
       live = false;
     };
@@ -47,10 +47,15 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
   // Held as a style object so the aura is not rebuilt on every position tick.
   const aura = useMemo(
     () =>
-      Object.fromEntries(
-        palette.map((colour, index) => [`--aura-${index + 1}`, colour]),
-      ) as React.CSSProperties,
-    [palette],
+      backdrop
+        ? ({
+            "--aura-base": backdrop.base,
+            ...Object.fromEntries(
+              backdrop.washes.map((colour, index) => [`--aura-${index + 1}`, colour]),
+            ),
+          } as React.CSSProperties)
+        : ({} as React.CSSProperties),
+    [backdrop],
   );
 
   useEffect(() => {
@@ -82,13 +87,16 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
   const progress = Math.min(1, position / duration);
 
   return (
-    <div className={`playing${palette.length > 0 ? " playing--aura" : ""}`} style={aura}>
-      {/* Three slow washes of colour taken from the sleeve, drifting at
-          different speeds so they never quite repeat. Transform and opacity
-          only, so the compositor animates them without repainting -- this
-          screen is on-screen while audio is playing and must not compete with
-          the callback for CPU. */}
-      {palette.length > 0 && (
+    <div className={`playing${backdrop ? " playing--aura" : ""}`} style={aura}>
+      {/* The sleeve's dominant colour fills the view, and three faint washes
+          drift across it at different speeds so the field never quite repeats.
+          One colour carrying the screen, modulated a little -- three equal
+          hues sweeping around read as a lava lamp.
+
+          Transform only, so the compositor moves them without repainting: this
+          screen is on while audio is playing and must not compete with the
+          callback for CPU. */}
+      {backdrop && (
         <div className="aura" aria-hidden="true">
           <span className="aura__blob aura__blob--1" />
           <span className="aura__blob aura__blob--2" />

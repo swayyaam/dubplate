@@ -290,12 +290,15 @@ async fn accent_color(state: State<'_, Arc<AppState>>, hash: String) -> Fallible
     .map_err(to_error)?
 }
 
-/// Up to three colours from a sleeve, for the now playing backdrop.
+/// The colours a sleeve lends the now playing backdrop.
 #[tauri::command]
-async fn accent_palette(state: State<'_, Arc<AppState>>, hash: String) -> Fallible<Vec<String>> {
+async fn accent_palette(
+    state: State<'_, Arc<AppState>>,
+    hash: String,
+) -> Fallible<dubplate_library::artwork::Backdrop> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(dubplate_library::artwork::palette(&state.artwork, &hash))
+        Ok(dubplate_library::artwork::backdrop(&state.artwork, &hash))
     })
     .await
     .map_err(to_error)?

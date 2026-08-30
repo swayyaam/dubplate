@@ -305,3 +305,11 @@ export interface UndoBatch {
   tracks: number;
   createdAt: number;
 }
+
+/** Mirrors `dubplate_library::artwork::Backdrop`. */
+export interface Backdrop {
+  /** The sleeve's dominant colour, deep enough for grey text to read on it. */
+  base: string;
+  /** Slow-moving modulation drawn faintly over the base. */
+  washes: string[];
+}

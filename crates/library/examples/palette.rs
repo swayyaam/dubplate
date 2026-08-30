@@ -2,7 +2,7 @@
 //!
 //!     cargo run -p dubplate-library --example palette -- <hash> ...
 
-use dubplate_library::artwork::{accent, palette, ArtworkCache};
+use dubplate_library::artwork::{accent, backdrop, ArtworkCache};
 
 fn main() {
     let root = dirs_next_data().join("artwork");
@@ -10,7 +10,9 @@ fn main() {
     for hash in std::env::args().skip(1) {
         println!("── {hash}");
         println!("   accent  {:?}", accent(&cache, &hash));
-        println!("   palette {:?}", palette(&cache, &hash));
+        let back = backdrop(&cache, &hash);
+        println!("   base    {:?}", back.base);
+        println!("   washes  {:?}", back.washes);
     }
 }
 

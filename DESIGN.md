@@ -42,19 +42,29 @@ Everything else stays achromatic.
 
 ### Now playing: the record sets the colour
 
-One screen goes further. Three colours are taken from the sleeve, separated in
-hue so they are not three shades of the same orange, and drift behind the
-content as slow washes. The panels over them are glass -- translucent, blurred,
-with a hairline of light along the top edge.
+One screen goes further. The sleeve's dominant colour fills it, re-lit deep
+enough that small grey text still reads, and three faint washes drift across it
+so the field is never quite still.
+
+**One colour carries the screen; everything else only modulates it.** Washes of
+equal weight in different hues read as a lava lamp -- an effect rather than an
+atmosphere -- and a secondary colour left where the sleeve put it parks a patch
+of a different hue on one side, at which point the field has stopped being one
+colour. So each wash is pulled a third of the way back to the dominant hue: the
+sleeve's character survives, the field does not break into panels.
+
+Movement is deliberately below the threshold of noticing. Periods run to a
+minute and the travel is single-digit percentages; you should not be able to
+catch it moving, only notice that it has.
 
 The washes animate `transform` only, so the compositor moves them without
-repainting: this screen is on-screen while audio is playing and must not
-compete with the callback for CPU. They are masked away before the transport,
-so the bar stays near-black and the colour reads as depth behind the record
-rather than as a coloured panel. `prefers-reduced-motion` stops them.
+repainting: this screen is on while audio is playing and must not compete with
+the callback for CPU. They are masked away before the transport, so the bar
+stays near-black. `prefers-reduced-motion` stops them.
 
-The controls stay green throughout. The record colours the space, not the
-buttons.
+Panels over the colour are glass -- darkened, blurred, with a hairline of light
+along the top edge. The controls stay green throughout. The record colours the
+space, not the buttons.
 
 ## Typography
 
