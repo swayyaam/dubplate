@@ -112,13 +112,13 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
         className="cover--hero cover--playing"
       />
 
-      <div className="playing__text glass">
+      <div className="playing__text">
         <h1 className="playing__title">{track ? trackTitle(track) : "—"}</h1>
         <p className="playing__artist">{track ? trackArtist(track) : ""}</p>
         {track?.album && <p className="playing__album">{track.album}</p>}
       </div>
 
-      <div className="playing__seek glass">
+      <div className="playing__seek">
         <Waveform
           data={peaks}
           progress={progress}
@@ -137,7 +137,7 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
       {/* Tempo, key and loudness were all measured by the analysis pass, so a
           set that mixes can be built out of them. */}
       <button
-        className="button glass"
+        className="button"
         disabled={building}
         onClick={() => {
           setBuilding(true);

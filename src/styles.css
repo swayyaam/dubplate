@@ -1246,40 +1246,28 @@ button, input { font: inherit; color: inherit; }
 }
 
 /*
- * Glass: a translucent pane over the colour.
+ * Text on the colour field is white at reduced opacity, not the fixed greys.
  *
- * Only on the panels that actually sit on it. Backdrop blur is expensive over
- * large areas, so the wash is masked away before the transport and nothing
- * full-width uses this.
+ * #b3b3b3 and #7c7c7c are chosen to sit on near-black. Over a saturated field
+ * they read as dirty grey rather than as quieter versions of the title, and
+ * the faint one nearly disappears. Translucent white keeps the hue of whatever
+ * is behind it, so secondary text stays a quieter version of the same thing.
  */
-.glass {
-  background: rgba(0, 0, 0, 0.16);
-  backdrop-filter: blur(30px) saturate(1.2);
-  -webkit-backdrop-filter: blur(30px) saturate(1.2);
-  /* A hairline of light along the top edge, which is what makes a pane read as
-     glass rather than as a darker box. */
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
+.playing .playing__artist { color: rgba(255, 255, 255, 0.78); }
+.playing .playing__album { color: rgba(255, 255, 255, 0.55); }
+.playing .playing__times { color: rgba(255, 255, 255, 0.55); }
+.playing .verdict__reason { color: rgba(255, 255, 255, 0.72); }
 
-.playing__text.glass {
-  padding: 20px 32px;
-  border-radius: var(--r-panel);
-}
-.playing__seek.glass {
-  padding: 18px 20px 12px;
-  border-radius: var(--r-panel);
-}
-.button.glass { background: rgba(0, 0, 0, 0.22); }
-.button.glass:hover:not(:disabled) { background: rgba(0, 0, 0, 0.34); }
-
-/* The verdict already has a surface; over the wash it becomes glass too. */
-.playing .verdict {
-  background: rgba(0, 0, 0, 0.16);
-  backdrop-filter: blur(30px) saturate(1.2);
-  -webkit-backdrop-filter: blur(30px) saturate(1.2);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
-}
-.playing .verdict--button:hover { background: rgba(0, 0, 0, 0.3); }
+/*
+ * Nothing is put in a container here.
+ *
+ * Panes over the colour were tried and were wrong: a translucent card on a
+ * near-black background reads as glass, but on a saturated field it reads as a
+ * darker rectangle, and four of them chop the field into boxes. The title, the
+ * waveform and the times sit directly on the colour. The two controls keep the
+ * ordinary dark pill from the design system, because they are controls and
+ * need an edge to be pressable.
+ */
 
 /* The sleeve sits above the colour it produced. */
 .playing .cover--hero { box-shadow: 0 32px 80px rgba(0, 0, 0, 0.55); }

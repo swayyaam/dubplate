@@ -62,9 +62,20 @@ repainting: this screen is on while audio is playing and must not compete with
 the callback for CPU. They are masked away before the transport, so the bar
 stays near-black. `prefers-reduced-motion` stops them.
 
-Panels over the colour are glass -- darkened, blurred, with a hairline of light
-along the top edge. The controls stay green throughout. The record colours the
-space, not the buttons.
+Nothing on this screen is put in a container. Translucent panes were tried and
+were wrong: on a near-black background a pane reads as glass, but on a
+saturated field it reads as a darker rectangle, and several of them chop the
+field into boxes. The title, the waveform and the times sit directly on the
+colour. Only the two controls keep a surface, because they are controls and
+need an edge to be pressable.
+
+Secondary text here is white at reduced opacity rather than the fixed greys.
+`#b3b3b3` and `#7c7c7c` are chosen to sit on near-black; over a colour field
+they read as dirty grey and the fainter one nearly disappears. Translucent
+white keeps the hue of whatever is behind it.
+
+The controls stay green throughout. The record colours the space, not the
+buttons.
 
 ## Typography
 
