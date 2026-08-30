@@ -83,6 +83,21 @@ buttons.
 spec's own fallbacks. Weights are binary: 700 for emphasis and navigation, 400
 for everything else, 600 only on button labels.
 
+### The wordmark
+
+One exception, and the only place the interface has a voice of its own:
+**Chillax at 21px/600, lowercase**, self-hosted rather than fetched from a CDN
+because an offline player has no business failing to draw its own name when
+there is no network.
+
+Set against an interface that is otherwise uppercase labels and a neutral
+grotesque, which is the point -- it reads as a name rather than as another
+button. No positive tracking: that is a fix for uppercase, where every letter
+is the same height and needs air. Lowercase already has ascenders and
+descenders doing that work, and spacing it out only makes the name come apart.
+
+Chillax is free for personal and commercial use under the Fontshare licence.
+
 | Role | Size | Weight | Notes |
 |---|---|---|---|
 | Section title | 24px | 700 | |

@@ -1,3 +1,21 @@
+/*
+ * Chillax, for the wordmark and nothing else.
+ *
+ * Self-hosted rather than pulled from Fontshare's CDN. This is an offline
+ * player for a local library: it has no business failing to draw its own name
+ * because there is no network, and a webfont request at launch is a request
+ * that can hang.
+ *
+ * Chillax is free for personal and commercial use under the Fontshare licence.
+ */
+@font-face {
+  font-family: "Chillax";
+  src: url("/fonts/chillax-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+
 /* ---------------------------------------------------------------------------
    dubplate — see DESIGN.md.
 
@@ -105,11 +123,26 @@ button, input { font: inherit; color: inherit; }
   user-select: none;
 }
 
+/*
+ * The wordmark is the one place the interface is allowed its own voice.
+ *
+ * Lowercase and set in Chillax, against an interface that is otherwise
+ * uppercase labels and a neutral grotesque -- which is the point. It reads as a
+ * name rather than as another button.
+ *
+ * No positive tracking. That is a fix for uppercase, where the letters are all
+ * the same height and need air; lowercase already has ascenders and descenders
+ * doing that work, and spacing it out only makes the name come apart.
+ */
 .wordmark {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 1.6px;
-  text-transform: uppercase;
+  font-family: "Chillax", var(--sans);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  /* Measured: Chillax's ink centre sits within a third of a pixel of the tab
+     face's when their baselines align, so centring the boxes is enough and a
+     nudge would only introduce an error. */
+  line-height: 1;
   color: var(--accent);
 }
 

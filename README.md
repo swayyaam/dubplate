@@ -62,6 +62,7 @@ Working today:
   coloured by the low/mid/high mix
 - Spotify-derived visual system (see [DESIGN.md](DESIGN.md)): near-black
   surfaces, one functional green accent, pill and circle geometry
+- Wordmark set lowercase in Chillax, self-hosted so it works offline
 - The waveform is coloured from the current cover; the interface stays achromatic
 - Now playing drifts three colours taken from the sleeve behind glass panels
 
