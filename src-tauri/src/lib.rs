@@ -290,6 +290,17 @@ async fn accent_color(state: State<'_, Arc<AppState>>, hash: String) -> Fallible
     .map_err(to_error)?
 }
 
+/// Up to three colours from a sleeve, for the now playing backdrop.
+#[tauri::command]
+async fn accent_palette(state: State<'_, Arc<AppState>>, hash: String) -> Fallible<Vec<String>> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(dubplate_library::artwork::palette(&state.artwork, &hash))
+    })
+    .await
+    .map_err(to_error)?
+}
+
 /// The waveform for the seek bar, as raw bytes.
 ///
 /// Bytes rather than JSON: five lanes of a thousand values would be a 20KB
@@ -1053,6 +1064,7 @@ pub fn run() {
             list_albums,
             album_tracks,
             accent_color,
+            accent_palette,
             waveform,
             get_ui_state,
             set_ui_state,

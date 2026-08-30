@@ -63,6 +63,7 @@ Working today:
 - Spotify-derived visual system (see [DESIGN.md](DESIGN.md)): near-black
   surfaces, one functional green accent, pill and circle geometry
 - The waveform is coloured from the current cover; the interface stays achromatic
+- Now playing drifts three colours taken from the sleeve behind glass panels
 
 Deliberately correct, because each is easy to get wrong:
 

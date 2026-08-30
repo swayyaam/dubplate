@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lofty::config::{ParseOptions, ParsingMode, WriteOptions};
-use lofty::file::{FileType, TaggedFileExt};
+use lofty::file::TaggedFileExt;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{ItemKey, Tag, TagType};
@@ -434,11 +434,9 @@ fn current_artwork(path: &Path) -> Option<Vec<u8>> {
 /// against the file as the previous pass left it, is what actually produces
 /// both chunks.
 fn write_one(path: &Path, edit: &TagEdit, cover: Option<&Cover>) -> Result<()> {
-    use lofty::file::AudioFile;
     use lofty::tag::TagExt;
 
     let tagged = probe(path)?;
-    let file_type = tagged.file_type();
     let existing = tagged.primary_tag().or_else(|| tagged.first_tag()).cloned();
 
     let temp = temp_beside(path)?;

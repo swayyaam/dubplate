@@ -40,6 +40,22 @@ So there are two:
 
 Everything else stays achromatic.
 
+### Now playing: the record sets the colour
+
+One screen goes further. Three colours are taken from the sleeve, separated in
+hue so they are not three shades of the same orange, and drift behind the
+content as slow washes. The panels over them are glass -- translucent, blurred,
+with a hairline of light along the top edge.
+
+The washes animate `transform` only, so the compositor moves them without
+repainting: this screen is on-screen while audio is playing and must not
+compete with the callback for CPU. They are masked away before the transport,
+so the bar stays near-black and the colour reads as depth behind the record
+rather than as a coloured panel. `prefers-reduced-motion` stops them.
+
+The controls stay green throughout. The record colours the space, not the
+buttons.
+
 ## Typography
 
 `SpotifyMixUI` is proprietary and not shipped, so the stack falls through to the

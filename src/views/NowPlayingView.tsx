@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { FlowStep, TrackRow } from "../types";
 import { Cover } from "../components/Cover";
@@ -25,6 +25,33 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
   const [peaks, setPeaks] = useState<WaveformData | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
   const [building, setBuilding] = useState(false);
+  const [palette, setPalette] = useState<string[]>([]);
+
+  // Colours from the sleeve, for the backdrop. Separate from the single accent
+  // the waveform uses: a wash needs more than one colour or it has no depth.
+  const artHash = trackId !== null ? (trackById.get(trackId)?.artHash ?? null) : null;
+  useEffect(() => {
+    if (!artHash) {
+      setPalette([]);
+      return;
+    }
+    let live = true;
+    void invoke<string[]>("accent_palette", { hash: artHash })
+      .then((colours) => live && setPalette(colours))
+      .catch(() => live && setPalette([]));
+    return () => {
+      live = false;
+    };
+  }, [artHash]);
+
+  // Held as a style object so the aura is not rebuilt on every position tick.
+  const aura = useMemo(
+    () =>
+      Object.fromEntries(
+        palette.map((colour, index) => [`--aura-${index + 1}`, colour]),
+      ) as React.CSSProperties,
+    [palette],
+  );
 
   useEffect(() => {
     if (trackId === null) {
@@ -55,7 +82,21 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
   const progress = Math.min(1, position / duration);
 
   return (
-    <div className="playing">
+    <div className={`playing${palette.length > 0 ? " playing--aura" : ""}`} style={aura}>
+      {/* Three slow washes of colour taken from the sleeve, drifting at
+          different speeds so they never quite repeat. Transform and opacity
+          only, so the compositor animates them without repainting -- this
+          screen is on-screen while audio is playing and must not compete with
+          the callback for CPU. */}
+      {palette.length > 0 && (
+        <div className="aura" aria-hidden="true">
+          <span className="aura__blob aura__blob--1" />
+          <span className="aura__blob aura__blob--2" />
+          <span className="aura__blob aura__blob--3" />
+        </div>
+      )}
+
+      <div className="playing__scroll">
       <Cover
         hash={track?.artHash ?? null}
         size={1000}
@@ -63,13 +104,13 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
         className="cover--hero cover--playing"
       />
 
-      <div className="playing__text">
+      <div className="playing__text glass">
         <h1 className="playing__title">{track ? trackTitle(track) : "—"}</h1>
         <p className="playing__artist">{track ? trackArtist(track) : ""}</p>
         {track?.album && <p className="playing__album">{track.album}</p>}
       </div>
 
-      <div className="playing__seek">
+      <div className="playing__seek glass">
         <Waveform
           data={peaks}
           progress={progress}
@@ -88,7 +129,7 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
       {/* Tempo, key and loudness were all measured by the analysis pass, so a
           set that mixes can be built out of them. */}
       <button
-        className="button"
+        className="button glass"
         disabled={building}
         onClick={() => {
           setBuilding(true);
@@ -136,6 +177,7 @@ export function NowPlayingView({ trackById, onOpenSignal, onOpenQueue }: Props) 
           </span>
         </button>
       )}
+    </div>
     </div>
   );
 }

@@ -274,18 +274,22 @@ fn hash_bytes(bytes: &[u8]) -> String {
 ///
 /// Reads the 64px variant, which is already in the cache and is plenty: a
 /// dominant hue does not need resolution.
-pub fn accent(cache: &ArtworkCache, hash: &str) -> Option<String> {
+/// How many hue buckets the sleeve is reduced to.
+///
+/// 24 is fine enough to separate red from orange, coarse enough that noise in
+/// a photograph does not split one colour across two buckets.
+const HUE_BUCKETS: usize = 24;
+
+/// Weight and mean colour of every hue bucket in a sleeve.
+fn hue_buckets(cache: &ArtworkCache, hash: &str) -> Option<([f64; HUE_BUCKETS], [[f64; 3]; HUE_BUCKETS])> {
     if hash.is_empty() {
         return None;
     }
     let image = image::open(cache.variant_path(hash, VARIANTS[0])).ok()?;
     let rgb = image.to_rgb8();
 
-    // 24 hue buckets: fine enough to separate red from orange, coarse enough
-    // that noise in a photograph does not split a colour across two buckets.
-    const BUCKETS: usize = 24;
-    let mut weights = [0.0f64; BUCKETS];
-    let mut sums = [[0.0f64; 3]; BUCKETS];
+    let mut weights = [0.0f64; HUE_BUCKETS];
+    let mut sums = [[0.0f64; 3]; HUE_BUCKETS];
 
     for pixel in rgb.pixels() {
         let (r, g, b) = (pixel[0] as f64, pixel[1] as f64, pixel[2] as f64);
@@ -297,12 +301,26 @@ pub fn accent(cache: &ArtworkCache, hash: &str) -> Option<String> {
         }
         // Colourful, mid-lit pixels count for more than pale or dark ones.
         let weight = saturation * (1.0 - (lightness - 0.5).abs() * 1.2);
-        let bucket = ((hue / 360.0) * BUCKETS as f64) as usize % BUCKETS;
+        let bucket = ((hue / 360.0) * HUE_BUCKETS as f64) as usize % HUE_BUCKETS;
         weights[bucket] += weight;
         sums[bucket][0] += r * weight;
         sums[bucket][1] += g * weight;
         sums[bucket][2] += b * weight;
     }
+    Some((weights, sums))
+}
+
+fn bucket_hsl(sums: &[[f64; 3]; HUE_BUCKETS], weights: &[f64; HUE_BUCKETS], bucket: usize) -> (f64, f64, f64) {
+    let weight = weights[bucket];
+    to_hsl(
+        sums[bucket][0] / weight,
+        sums[bucket][1] / weight,
+        sums[bucket][2] / weight,
+    )
+}
+
+pub fn accent(cache: &ArtworkCache, hash: &str) -> Option<String> {
+    let (weights, sums) = hue_buckets(cache, hash)?;
 
     let (best, weight) = weights
         .iter()
@@ -313,17 +331,67 @@ pub fn accent(cache: &ArtworkCache, hash: &str) -> Option<String> {
         return None;
     }
 
-    let mean = [
-        sums[best][0] / weight,
-        sums[best][1] / weight,
-        sums[best][2] / weight,
-    ];
-    let (hue, saturation, _) = to_hsl(mean[0], mean[1], mean[2]);
+    let (hue, saturation, _) = bucket_hsl(&sums, &weights, best);
 
     // Re-light it. Whatever the sleeve's own lightness was, the accent has to
     // read against near-black and stay legible as small text.
     let (r, g, b) = from_hsl(hue, saturation.clamp(0.45, 0.85), 0.62);
     Some(format!("#{:02x}{:02x}{:02x}", r, g, b))
+}
+
+/// Up to three colours from a sleeve, for the now playing backdrop.
+///
+/// Separated in hue rather than simply the three heaviest buckets: adjacent
+/// buckets on a photograph are usually the same colour split in two, and three
+/// shades of the same orange make a backdrop that may as well be one colour.
+///
+/// Re-lit darker and more saturated than `accent`, because these are washes
+/// behind a near-black screen rather than text that has to stay legible.
+pub fn palette(cache: &ArtworkCache, hash: &str) -> Vec<String> {
+    const WANT: usize = 3;
+    /// Minimum separation between chosen buckets, in buckets.
+    const APART: usize = 3;
+
+    let Some((weights, sums)) = hue_buckets(cache, hash) else {
+        return Vec::new();
+    };
+
+    let mut order: Vec<usize> = (0..HUE_BUCKETS).filter(|b| weights[*b] > f64::EPSILON).collect();
+    order.sort_by(|a, b| weights[*b].partial_cmp(&weights[*a]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut chosen: Vec<usize> = Vec::new();
+    for bucket in order {
+        let clash = chosen.iter().any(|taken| {
+            let gap = (bucket as isize - *taken as isize).unsigned_abs();
+            gap.min(HUE_BUCKETS - gap) < APART
+        });
+        if !clash {
+            chosen.push(bucket);
+        }
+        if chosen.len() == WANT {
+            break;
+        }
+    }
+    if chosen.is_empty() {
+        return Vec::new();
+    }
+
+    // A sleeve with only one or two real colours gets the ones it has, shifted
+    // around the wheel, rather than a backdrop that is flat on one side.
+    let mut out = Vec::with_capacity(WANT);
+    for index in 0..WANT {
+        let bucket = chosen[index % chosen.len()];
+        let (hue, saturation, _) = bucket_hsl(&sums, &weights, bucket);
+        let spun = hue + if index < chosen.len() { 0.0 } else { 28.0 * index as f64 };
+        let (r, g, b) = from_hsl(
+            spun.rem_euclid(360.0),
+            saturation.clamp(0.5, 0.9),
+            // Descending, so the layers read as depth rather than as a flat wash.
+            0.46 - 0.07 * index as f64,
+        );
+        out.push(format!("#{:02x}{:02x}{:02x}", r, g, b));
+    }
+    out
 }
 
 fn to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
